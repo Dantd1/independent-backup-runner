@@ -4,6 +4,7 @@
 # Not installed in .github/workflows; no schedule is activated by this commit.
 # Keep the package at scripts/backup in that repository.
 name: Independent staging backup
+run-name: Staging backup — ${{ inputs.mode || 'backup' }}
 on:
   schedule:
     - cron: "23 3,15 * * *"
