@@ -1,0 +1,55 @@
+# Template for a dedicated operations repository, default branch automation.
+# Public publication requires approval; publish only the generic package/workflow.
+# Private runners require verified available included compute or approved spending.
+# Not installed in .github/workflows; no schedule is activated by this commit.
+# Keep the package at scripts/backup in that repository.
+name: Independent staging backup
+on:
+  schedule:
+    - cron: "23 3,15 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        type: choice
+        options: [inventory, backup]
+        default: inventory
+permissions:
+  contents: read
+concurrency:
+  group: independent-staging-backup
+  cancel-in-progress: false
+jobs:
+  backup:
+    if: vars.BACKUP_RUNNER_ENABLED == 'true' && vars.BACKUP_ZERO_COST_VERIFIED == 'true'
+    environment: backup-staging
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+      - working-directory: scripts/backup
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - working-directory: scripts/backup
+        run: npm test
+      - name: Run bounded staging backup
+        working-directory: scripts/backup
+        env:
+          XFINDER_ENVIRONMENT: staging
+          BACKUP_ZERO_COST_VERIFIED: ${{ vars.BACKUP_ZERO_COST_VERIFIED }}
+          BACKUP_SCOPE_JSON: ${{ secrets.BACKUP_SCOPE_JSON }}
+          BACKUP_DB_URL: ${{ secrets.BACKUP_DB_URL }}
+          STORAGE_API_KEY: ${{ secrets.STORAGE_API_KEY }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          KV_READ_TOKEN: ${{ secrets.KV_READ_TOKEN }}
+          B2_READ_KEY_ID: ${{ secrets.B2_READ_KEY_ID }}
+          B2_READ_KEY: ${{ secrets.B2_READ_KEY }}
+          B2_WRITE_KEY_ID: ${{ secrets.B2_WRITE_KEY_ID }}
+          B2_WRITE_KEY: ${{ secrets.B2_WRITE_KEY }}
+          AGE_RECIPIENT: ${{ secrets.AGE_RECIPIENT }}
+          BACKUP_MODE: ${{ github.event_name == 'schedule' && 'backup' || inputs.mode }}
+        run: node run.mjs "$BACKUP_MODE"
