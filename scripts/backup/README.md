@@ -31,18 +31,16 @@ All values below belong in a protected execution environment, not in this repo:
 
 - `BACKUP_SCOPE_JSON`: JSON containing `environment` (`staging`), `projectRef`,
   `cfAccount`, `r2Bucket` (ending in `-staging`), `kvNamespace`, `b2Account`,
-  `b2Bucket`, `b2Name` (containing `-staging`), `dbRole` and `recoveryObject`.
-- `BACKUP_DB_URL`: dedicated catalog reader, TLS verified. No admin connection.
-- `STORAGE_API_KEY`: dedicated staging secret key, never an owner management
-  PAT. Supabase secret keys have project-wide privileges; they are **not
-  read-only**. Record this privilege explicitly and review it before
-  installation. This runner uses only object GET requests. Restrict sources
-  further through a dedicated export service if project-wide key exposure is
-  unacceptable.
-- `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY`: S3 Object Read Only, exact
-  bucket.
-- `KV_READ_TOKEN`: KV Read only. Record any issuer limitation on namespace
-  scope.
+  `b2Bucket`, `b2Name` (containing `-staging`), `sitesExportUrl` (dedicated
+  staging Workers HTTPS endpoint) and `recoveryObject`.
+- `STORAGE_READER_ID` / `STORAGE_READER_KEY`: expiring HMAC reader for the
+  dedicated staging Storage export endpoint. No direct database or project key.
+- `SITES_READER_ID` / `SITES_READER_KEY`: separate expiring HMAC reader for a
+  dedicated read-only exporter bound only to staging R2 and KV.
+  Both exporters verify signatures over the exact request body and timestamp,
+  allow a 60-second clock window, reject browser origins, and expose no mutation
+  operation. Repeated signed reads inside that window are idempotent.
+  Administrative source credentials remain inside their providers.
 - `B2_READ_KEY_ID` / `B2_READ_KEY`: exact bucket/prefix `staging/`, capabilities
   `readFiles,listFiles,readFileRetentions,listBuckets,listAllBucketNames`.
 - `B2_WRITE_KEY_ID` / `B2_WRITE_KEY`: exact bucket/prefix `staging/`,
@@ -53,7 +51,7 @@ All values below belong in a protected execution environment, not in this repo:
 - `XFINDER_ENVIRONMENT=staging` and `BACKUP_ZERO_COST_VERIFIED=true`: explicit
   gates.
 
-Before first execution, the encrypted recovery identity and both B2 credential
+Before first execution, the encrypted recovery identity and all four credential
 archives must already exist at the configured recovery object and
 `staging/credentials/<issuer-key-id>.age`. Credential issuance/rotation and
 portable recovery are separate, mandatory operator procedures. The runner never

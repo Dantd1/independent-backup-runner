@@ -51,11 +51,10 @@ export function configFromEnv(env) {
   );
   const names = [
     "BACKUP_SCOPE_JSON",
-    "BACKUP_DB_URL",
-    "STORAGE_API_KEY",
-    "R2_ACCESS_KEY_ID",
-    "R2_SECRET_ACCESS_KEY",
-    "KV_READ_TOKEN",
+    "STORAGE_READER_ID",
+    "STORAGE_READER_KEY",
+    "SITES_READER_ID",
+    "SITES_READER_KEY",
     "B2_READ_KEY_ID",
     "B2_READ_KEY",
     "B2_WRITE_KEY_ID",
@@ -87,7 +86,7 @@ export function configFromEnv(env) {
         "b2Account",
         "b2Bucket",
         "b2Name",
-        "dbRole",
+        "sitesExportUrl",
         "recoveryObject",
       ]
         .every((name) =>
@@ -113,31 +112,31 @@ export function configFromEnv(env) {
     "invalid_b2_scope",
   );
   requireSafe(
-    /^[a-z][a-z0-9_]{2,40}$/.test(scope.dbRole) &&
-      /backup.*reader/.test(scope.dbRole) &&
-      typeof scope.recoveryObject === "string" &&
+    typeof scope.recoveryObject === "string" &&
       scope.recoveryObject.startsWith("staging/recovery/"),
     "invalid_recovery_scope",
   );
   sourcePath(scope.recoveryObject);
   config.scope = scope;
-  const db = new URL(config.BACKUP_DB_URL);
-  const user = decodeURIComponent(db.username);
+  const sites = new URL(scope.sitesExportUrl);
   requireSafe(
-    db.protocol === "postgresql:" || db.protocol === "postgres:",
-    "invalid_database_protocol",
+    sites.protocol === "https:" && !sites.username && !sites.password &&
+      !sites.search && sites.pathname === "/" &&
+      sites.hostname.endsWith(".workers.dev") &&
+      sites.hostname.split(".")[0].endsWith("-staging"),
+    "source_origin_rejected",
   );
+  for (const prefix of ["STORAGE", "SITES"]) {
+    requireSafe(
+      /^[0-9a-f-]{36}$/.test(config[prefix + "_READER_ID"]) &&
+        config[prefix + "_READER_KEY"].length >= 32,
+      "invalid_reader_configuration",
+    );
+  }
   requireSafe(
-    (db.hostname === `db.${scope.projectRef}.supabase.co` &&
-      user === scope.dbRole) ||
-      (db.hostname.endsWith(".pooler.supabase.com") &&
-        user === `${scope.dbRole}.${scope.projectRef}`),
-    "database_scope_rejected",
-  );
-  requireSafe(
-    config.STORAGE_API_KEY.startsWith("sb_secret_") &&
-      !/[<>\s*]/.test(config.STORAGE_API_KEY),
-    "invalid_storage_key",
+    config.STORAGE_READER_ID !== config.SITES_READER_ID &&
+      config.STORAGE_READER_KEY !== config.SITES_READER_KEY,
+    "shared_source_reader_rejected",
   );
   requireSafe(
     config.B2_READ_KEY_ID !== config.B2_WRITE_KEY_ID,

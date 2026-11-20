@@ -24,19 +24,17 @@ const scope = {
   b2Account: "synthetic",
   b2Bucket: "fixture",
   b2Name: "synthetic-staging-backup",
-  dbRole: "backup_reader",
+  sitesExportUrl: "https://synthetic-staging.example.workers.dev/",
   recoveryObject: "staging/recovery/synthetic/identity.age",
 };
 const environment = () => ({
   XFINDER_ENVIRONMENT: "staging",
   BACKUP_ZERO_COST_VERIFIED: "true",
   BACKUP_SCOPE_JSON: JSON.stringify(scope),
-  BACKUP_DB_URL:
-    `postgresql://backup_reader@db.${scope.projectRef}.supabase.co/postgres`,
-  STORAGE_API_KEY: "sb_secret_synthetic_not_a_live_key",
-  R2_ACCESS_KEY_ID: "synthetic",
-  R2_SECRET_ACCESS_KEY: "synthetic",
-  KV_READ_TOKEN: "synthetic",
+  STORAGE_READER_ID: "11111111-1111-4111-8111-111111111111",
+  STORAGE_READER_KEY: "synthetic-storage-reader-value-not-live",
+  SITES_READER_ID: "22222222-2222-4222-8222-222222222222",
+  SITES_READER_KEY: "synthetic-sites-reader-value-not-live",
   B2_READ_KEY_ID: "synthetic-reader",
   B2_READ_KEY: "synthetic",
   B2_WRITE_KEY_ID: "synthetic-writer",
@@ -49,9 +47,9 @@ test("activation, staging scope, independent B2 roles and free-cap guards fail c
     const changes of [
       { XFINDER_ENVIRONMENT: "production" },
       { BACKUP_ZERO_COST_VERIFIED: "false" },
-      { BACKUP_DB_URL: "postgresql://postgres@db.other.supabase.co/postgres" },
+      { STORAGE_READER_ID: "invalid" },
       { B2_WRITE_KEY_ID: "synthetic-reader" },
-      { STORAGE_API_KEY: "sb_secret_<secret>" },
+      { STORAGE_READER_KEY: "too-short" },
     ]
   ) assert.throws(() => configFromEnv({ ...environment(), ...changes }));
   assert.throws(() =>

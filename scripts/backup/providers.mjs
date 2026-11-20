@@ -1,8 +1,18 @@
 import { AwsClient } from "aws4fetch";
-import postgres from "postgres";
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { Buffer } from "node:buffer";
-import { b2Url, parseR2List, requireSafe, sourcePath } from "./core.mjs";
+import { b2Url, requireSafe, sourcePath } from "./core.mjs";
+export function signedReadHeaders(id, secret, body, now = Date.now()) {
+  const timestamp = String(now);
+  return {
+    "content-type": "application/json",
+    "x-backup-key-id": id,
+    "x-backup-time": timestamp,
+    "x-backup-signature": createHmac("sha256", secret).update(
+      timestamp + "\n" + body,
+    ).digest("hex"),
+  };
+}
 export async function boundedBytes(response, limit = 64 * 1024 * 1024) {
   requireSafe(response.ok, "provider_http_" + response.status);
   const chunks = [];
@@ -17,7 +27,6 @@ export async function boundedBytes(response, limit = 64 * 1024 * 1024) {
 export function connectProviders(c, { fetcher = fetch } = {}) {
   const {
     projectRef: STAGE,
-    cfAccount: CF_ACCOUNT,
     b2Bucket: B2_BUCKET,
     b2Name: B2_NAME,
   } = c.scope;
@@ -80,7 +89,12 @@ export function connectProviders(c, { fetcher = fetch } = {}) {
   }
   const uploads = new Map();
   const b2 = {
-    keyIds: [c.B2_WRITE_KEY_ID, c.B2_READ_KEY_ID],
+    keyIds: [
+      c.B2_WRITE_KEY_ID,
+      c.B2_READ_KEY_ID,
+      c.STORAGE_READER_ID,
+      c.SITES_READER_ID,
+    ],
     async inventory() {
       await auth("write");
       const reader = await auth("read");
@@ -205,122 +219,90 @@ export function connectProviders(c, { fetcher = fetch } = {}) {
       );
     },
   };
-  const db = postgres(c.BACKUP_DB_URL, {
-    ssl: { rejectUnauthorized: true },
-    max: 1,
-    prepare: false,
-    connect_timeout: 15,
-    idle_timeout: 10,
-    onnotice: () => {},
-  });
+  const storageUrl =
+    `https://${STAGE}.supabase.co/functions/v1/staging-backup-export`;
+  const sitesUrl = c.scope.sitesExportUrl;
+  async function readExport(kind, operation, extra = {}) {
+    const raw = JSON.stringify({ operation, ...extra });
+    const storage = kind === "storage";
+    return request(storage ? storageUrl : sitesUrl, {
+      method: "POST",
+      headers: signedReadHeaders(
+        storage ? c.STORAGE_READER_ID : c.SITES_READER_ID,
+        storage ? c.STORAGE_READER_KEY : c.SITES_READER_KEY,
+        raw,
+      ),
+      body: raw,
+    });
+  }
+  const verified = {};
+  async function verify(kind) {
+    if (verified[kind]) return;
+    const meta = JSON.parse(
+      (await boundedBytes(await readExport(kind, "metadata"), 16384))
+        .toString(),
+    );
+    requireSafe(
+      meta.environment === "staging" && meta.readOnly === true &&
+        meta.keyId ===
+          c[kind === "storage" ? "STORAGE_READER_ID" : "SITES_READER_ID"] &&
+        Date.parse(meta.expiresAt) > Date.now(),
+      "source_scope_mismatch",
+    );
+    if (kind === "sites") {
+      requireSafe(
+        meta.r2Bucket === c.scope.r2Bucket &&
+          meta.kvNamespace === c.scope.kvNamespace,
+        "source_scope_mismatch",
+      );
+    }
+    verified[kind] = true;
+  }
+  async function catalog(kind, operation) {
+    await verify(kind);
+    return JSON.parse(
+      (await boundedBytes(await readExport(kind, operation), 16 * 1024 * 1024))
+        .toString(),
+    );
+  }
   const storage = {
-    list() {
-      return db.begin("read only", async (tx) => {
-        const [role] =
-          await tx`select current_user as name, rolsuper, rolbypassrls, rolcreaterole,
-            rolcreatedb, rolreplication,
-            exists(select 1 from pg_catalog.pg_auth_members m where m.member=r.oid) as memberships
-            from pg_catalog.pg_roles r where rolname=current_user`;
-        requireSafe(
-          role.name === c.scope.dbRole && !role.rolsuper &&
-            !role.rolbypassrls &&
-            !role.rolcreaterole && !role.rolcreatedb && !role.rolreplication &&
-            !role.memberships,
-          "database_role_rejected",
-        );
-        const [row] =
-          await tx`select backup_export.storage_catalog() as catalog`;
-        return row.catalog;
-      });
+    async list() {
+      const result = await catalog("storage", "catalog");
+      return result.catalog;
     },
     async read(item) {
-      const url = `https://${STAGE}.supabase.co/storage/v1/object/` +
-        sourcePath(item.bucket + "/" + item.name);
-      const result = await request(url, {
-        headers: { apikey: c.STORAGE_API_KEY },
+      const response = await readExport("storage", "storage.get", {
+        bucket: item.bucket,
+        name: item.name,
       });
       return {
-        bytes: await boundedBytes(result),
-        etag: result.headers.get("etag"),
+        bytes: await boundedBytes(response),
+        etag: response.headers.get("etag"),
       };
     },
   };
-  const r2Aws = new AwsClient({
-    accessKeyId: c.R2_ACCESS_KEY_ID,
-    secretAccessKey: c.R2_SECRET_ACCESS_KEY,
-    service: "s3",
-    region: "auto",
-  });
-  const r2Base =
-    `https://${CF_ACCOUNT}.r2.cloudflarestorage.com/${c.scope.r2Bucket}`;
   const r2 = {
     async list() {
-      const objects = [], seen = new Set();
-      let cursor;
-      for (let page = 0; page < 100; page++) {
-        const url = new URL(r2Base);
-        url.searchParams.set("list-type", "2");
-        url.searchParams.set("max-keys", "1000");
-        if (cursor) url.searchParams.set("continuation-token", cursor);
-        const result = parseR2List(
-          (await boundedBytes(
-            await r2Aws.fetch(url.toString(), {
-              redirect: "error",
-              signal: AbortSignal.timeout(45000),
-            }),
-          )).toString(),
-        );
-        objects.push(...result.objects);
-        if (!result.next) return objects;
-        requireSafe(!seen.has(result.next), "r2_cursor_repeated");
-        seen.add(result.next);
-        cursor = result.next;
-      }
-      requireSafe(false, "r2_pagination_limit");
+      const result = await catalog("sites", "sites.catalog");
+      return result.objects;
     },
     async read(item) {
-      const result = await r2Aws.fetch(r2Base + "/" + sourcePath(item.key), {
-        redirect: "error",
-        signal: AbortSignal.timeout(45000),
-      });
+      const response = await readExport("sites", "r2.get", { name: item.key });
       return {
-        bytes: await boundedBytes(result),
-        etag: result.headers.get("etag"),
+        bytes: await boundedBytes(response),
+        etag: response.headers.get("etag"),
       };
     },
   };
-  const kvBase =
-    `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/storage/kv/namespaces/${c.scope.kvNamespace}`;
   const kv = {
     async list() {
-      const keys = [], seen = new Set();
-      let cursor;
-      for (let page = 0; page < 100; page++) {
-        const url = new URL(kvBase + "/keys");
-        url.searchParams.set("limit", "1000");
-        if (cursor) url.searchParams.set("cursor", cursor);
-        const result = await json(url.toString(), {
-          headers: { Authorization: "Bearer " + c.KV_READ_TOKEN },
-        });
-        requireSafe(
-          result.success && Array.isArray(result.result),
-          "invalid_kv_listing",
-        );
-        keys.push(...result.result);
-        if (!result.result_info?.cursor) return keys;
-        cursor = result.result_info.cursor;
-        requireSafe(!seen.has(cursor), "kv_cursor_repeated");
-        seen.add(cursor);
-      }
-      requireSafe(false, "kv_pagination_limit");
+      const result = await catalog("sites", "sites.catalog");
+      return result.keys;
     },
     async read(item) {
-      const result = await request(
-        kvBase + "/values/" + encodeURIComponent(item.name),
-        { headers: { Authorization: "Bearer " + c.KV_READ_TOKEN } },
-      );
-      return { bytes: await boundedBytes(result) };
+      const response = await readExport("sites", "kv.get", { name: item.name });
+      return { bytes: await boundedBytes(response) };
     },
   };
-  return { storage, r2, kv, b2, close: () => db.end({ timeout: 5 }) };
+  return { storage, r2, kv, b2, close: () => Promise.resolve() };
 }

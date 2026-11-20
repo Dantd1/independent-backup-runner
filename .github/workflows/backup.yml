@@ -11,8 +11,8 @@ on:
     inputs:
       mode:
         type: choice
-        options: [inventory, backup]
-        default: inventory
+        options: [selftest, inventory, backup]
+        default: selftest
 permissions:
   contents: read
 concurrency:
@@ -20,7 +20,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   backup:
-    if: vars.BACKUP_RUNNER_ENABLED == 'true' && vars.BACKUP_ZERO_COST_VERIFIED == 'true'
+    if: vars.BACKUP_RUNNER_ENABLED == 'true' && vars.BACKUP_ZERO_COST_VERIFIED == 'true' && (github.event_name == 'workflow_dispatch' || vars.BACKUP_SCHEDULE_ENABLED == 'true')
     environment: backup-staging
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -36,16 +36,16 @@ jobs:
       - working-directory: scripts/backup
         run: npm test
       - name: Run bounded staging backup
+        if: github.event_name == 'schedule' || inputs.mode != 'selftest'
         working-directory: scripts/backup
         env:
           XFINDER_ENVIRONMENT: staging
           BACKUP_ZERO_COST_VERIFIED: ${{ vars.BACKUP_ZERO_COST_VERIFIED }}
           BACKUP_SCOPE_JSON: ${{ secrets.BACKUP_SCOPE_JSON }}
-          BACKUP_DB_URL: ${{ secrets.BACKUP_DB_URL }}
-          STORAGE_API_KEY: ${{ secrets.STORAGE_API_KEY }}
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          KV_READ_TOKEN: ${{ secrets.KV_READ_TOKEN }}
+          STORAGE_READER_ID: ${{ secrets.STORAGE_READER_ID }}
+          STORAGE_READER_KEY: ${{ secrets.STORAGE_READER_KEY }}
+          SITES_READER_ID: ${{ secrets.SITES_READER_ID }}
+          SITES_READER_KEY: ${{ secrets.SITES_READER_KEY }}
           B2_READ_KEY_ID: ${{ secrets.B2_READ_KEY_ID }}
           B2_READ_KEY: ${{ secrets.B2_READ_KEY }}
           B2_WRITE_KEY_ID: ${{ secrets.B2_WRITE_KEY_ID }}
