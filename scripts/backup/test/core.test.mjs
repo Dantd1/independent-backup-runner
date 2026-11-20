@@ -11,6 +11,7 @@ import {
   DAY,
   digest,
   parseR2List,
+  recordAttempt,
   requireSpace,
   snapshot,
   sourcePath,
@@ -40,6 +41,36 @@ const environment = () => ({
   B2_WRITE_KEY_ID: "synthetic-writer",
   B2_WRITE_KEY: "synthetic",
   AGE_RECIPIENT: "synthetic",
+});
+test("attempt telemetry is bounded, operational only and blocked when free capacity is exhausted", async () => {
+  const calls = [];
+  const b2 = {
+    inventory: async () => ({ bytes: 1000 }),
+    put: async (name, bytes, options) => {
+      calls.push({ name, payload: JSON.parse(bytes), options });
+    },
+  };
+  await recordAttempt(b2, "failure", 1700000000000);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].name, "staging/health/attempt.json");
+  assert.deepEqual(Object.keys(calls[0].payload).sort(), [
+    "completedAt",
+    "conclusion",
+    "environment",
+    "format",
+  ]);
+  assert.equal(calls[0].payload.conclusion, "failure");
+  await assert.rejects(
+    recordAttempt(
+      { ...b2, inventory: async () => ({ bytes: CAP }) },
+      "success",
+    ),
+    /free_capacity_limit/,
+  );
+  await assert.rejects(
+    recordAttempt(b2, "unexpected"),
+    /invalid_attempt_conclusion/,
+  );
 });
 test("activation, staging scope, independent B2 roles and free-cap guards fail closed", () => {
   assert.equal(configFromEnv(environment()).scope.environment, "staging");

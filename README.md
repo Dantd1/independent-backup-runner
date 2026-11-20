@@ -66,6 +66,15 @@ Only this sanitized timestamp/counter marker is unencrypted. Backups and source
 paths are encrypted. No source mutation or destination deletion is implemented.
 Histories remain until a separately controlled collector is installed.
 
+Backup mode also attempts a minimal `staging/health/attempt.json` record after
+success or a caught copy failure. It contains only format, environment, time and
+conclusion; no paths or configuration. Inventory mode never writes it. A failed
+attempt-report write does not hide the original copy result. The report obeys
+the capacity guard and compliance retention. Failures before the runner starts
+or while the destination is unavailable are detected by an independent observer
+through the age of the last successful marker, rather than relying on GitHub's
+public API or on an error notification sent by the failed workflow itself.
+
 The runner stops before exceeding 9 GB of managed retained data. A second B2
 bucket is rejected until account-wide accounting is configured. Provider free
 caps remain mandatory; this inventory covers the managed prefix, not arbitrary

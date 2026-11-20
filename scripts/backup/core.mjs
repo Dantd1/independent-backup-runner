@@ -475,3 +475,25 @@ export async function snapshot(
     fullServiceRecoveryVerified: false,
   };
 }
+
+// Minimal operational telemetry; no paths, configuration or secrets are published.
+export async function recordAttempt(b2, conclusion, now = Date.now()) {
+  requireSafe(
+    ["success", "failure"].includes(conclusion),
+    "invalid_attempt_conclusion",
+  );
+  const bytes = Buffer.from(
+    JSON.stringify({
+      format: "xfinder-backup-attempt-v1",
+      environment: "staging",
+      completedAt: new Date(now).toISOString(),
+      conclusion,
+    }),
+  );
+  const existing = await b2.inventory();
+  requireSpace(existing.bytes, bytes.length);
+  await b2.put("staging/health/attempt.json", bytes, {
+    until: now + 31 * DAY,
+    slot: 0,
+  });
+}

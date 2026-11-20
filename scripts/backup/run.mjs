@@ -1,6 +1,6 @@
 import * as age from "age-encryption";
 import process from "node:process";
-import { configFromEnv, snapshot } from "./core.mjs";
+import { configFromEnv, recordAttempt, snapshot } from "./core.mjs";
 import { connectProviders } from "./providers.mjs";
 let providers;
 try {
@@ -14,6 +14,16 @@ try {
     encrypter: cipher,
     mode: process.argv[2],
   });
+  if (process.argv[2] === "backup") {
+    await recordAttempt(providers.b2, "success").catch(() => {
+      console.warn(
+        JSON.stringify({
+          telemetry: "attempt_unavailable",
+          environment: "staging",
+        }),
+      );
+    });
+  }
   // Public runners must not expose resource identifiers, inventory, or object paths.
   console.log(
     JSON.stringify({
@@ -24,6 +34,16 @@ try {
     }),
   );
 } catch (e) {
+  if (providers && process.argv[2] === "backup") {
+    await recordAttempt(providers.b2, "failure").catch(() => {
+      console.warn(
+        JSON.stringify({
+          telemetry: "attempt_unavailable",
+          environment: "staging",
+        }),
+      );
+    });
+  }
   // Never print provider errors: they can contain URLs, credentials, SQL, or paths.
   const safe =
     typeof e.safeCode === "string" && /^[a-z_]+(?:_\d{3})?$/.test(e.safeCode)
