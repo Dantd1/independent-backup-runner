@@ -4,6 +4,7 @@ import { test } from "node:test";
 import { Buffer } from "node:buffer";
 import assert from "node:assert/strict";
 import * as age from "age-encryption";
+import { retrySourceRead } from "../providers.mjs";
 import {
   b2Url,
   CAP,
@@ -41,6 +42,44 @@ const environment = () => ({
   B2_WRITE_KEY_ID: "synthetic-writer",
   B2_WRITE_KEY: "synthetic",
   AGE_RECIPIENT: "synthetic",
+});
+
+test("read-only exporters retry transport/body failures, bound retries and refuse auth failures", async () => {
+  let calls = 0;
+  const result = await retrySourceRead(async () => {
+    if (++calls === 1) {
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.error(new TypeError("private details"));
+          },
+        }),
+      );
+    }
+    if (calls === 2) return new Response("unavailable", { status: 503 });
+    return new Response("synthetic", { headers: { etag: "synthetic" } });
+  }, { pause: async () => {} });
+  assert.equal(calls, 3);
+  assert.equal(await result.text(), "synthetic");
+  assert.equal(result.headers.get("etag"), "synthetic");
+  calls = 0;
+  await assert.rejects(
+    retrySourceRead(async () => {
+      calls++;
+      return new Response("private", { status: 403 });
+    }, { pause: async () => {} }),
+    /provider_http_403/,
+  );
+  assert.equal(calls, 1);
+  calls = 0;
+  await assert.rejects(
+    retrySourceRead(async () => {
+      calls++;
+      throw new DOMException("private", "TimeoutError");
+    }, { pause: async () => {} }),
+    /source_read_transport_failed/,
+  );
+  assert.equal(calls, 3);
 });
 test("attempt telemetry is bounded, operational only and blocked when free capacity is exhausted", async () => {
   const calls = [];

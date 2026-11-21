@@ -24,6 +24,45 @@ export async function boundedBytes(response, limit = 64 * 1024 * 1024) {
   }
   return Buffer.concat(chunks);
 }
+// Exporter POSTs are authenticated read-only operations. Consume the body inside
+// the retry boundary, and regenerate signed headers on every attempt.
+export async function retrySourceRead(
+  read,
+  { pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) } = {},
+) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const response = await read();
+      if ([429, 500, 502, 503, 504].includes(response.status)) {
+        await response.body?.cancel();
+        const error = Error("source temporarily unavailable");
+        error.safeCode = "source_read_unavailable";
+        throw error;
+      }
+      const bytes = await boundedBytes(response);
+      return new Response(bytes, {
+        status: response.status,
+        headers: response.headers,
+      });
+    } catch (error) {
+      const transport = ["TimeoutError", "AbortError", "TypeError"].includes(
+        error.name,
+      );
+      const transient = transport ||
+        error.safeCode === "source_read_unavailable";
+      if (!transient) throw error;
+      if (attempt === 2) {
+        requireSafe(
+          false,
+          transport
+            ? "source_read_transport_failed"
+            : "source_read_unavailable",
+        );
+      }
+      await pause(1000 * (attempt + 1));
+    }
+  }
+}
 export function connectProviders(c, { fetcher = fetch } = {}) {
   const {
     projectRef: STAGE,
@@ -222,18 +261,20 @@ export function connectProviders(c, { fetcher = fetch } = {}) {
   const storageUrl =
     `https://${STAGE}.supabase.co/functions/v1/staging-backup-export`;
   const sitesUrl = c.scope.sitesExportUrl;
-  async function readExport(kind, operation, extra = {}) {
+  function readExport(kind, operation, extra = {}) {
     const raw = JSON.stringify({ operation, ...extra });
     const storage = kind === "storage";
-    return request(storage ? storageUrl : sitesUrl, {
-      method: "POST",
-      headers: signedReadHeaders(
-        storage ? c.STORAGE_READER_ID : c.SITES_READER_ID,
-        storage ? c.STORAGE_READER_KEY : c.SITES_READER_KEY,
-        raw,
-      ),
-      body: raw,
-    });
+    return retrySourceRead(() =>
+      request(storage ? storageUrl : sitesUrl, {
+        method: "POST",
+        headers: signedReadHeaders(
+          storage ? c.STORAGE_READER_ID : c.SITES_READER_ID,
+          storage ? c.STORAGE_READER_KEY : c.SITES_READER_KEY,
+          raw,
+        ),
+        body: raw,
+      })
+    );
   }
   const verified = {};
   async function verify(kind) {

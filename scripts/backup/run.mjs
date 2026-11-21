@@ -12,6 +12,14 @@ try {
     ...providers,
     scope: config.scope,
     encrypter: cipher,
+    log: ({ phase, completed, total }) => {
+      if (
+        ["copy", "recovery_pack"].includes(phase) &&
+        Number.isSafeInteger(completed) && Number.isSafeInteger(total)
+      ) {
+        console.log(JSON.stringify({ phase, completed, total }));
+      }
+    },
     mode: process.argv[2] === "backup-packed" ? "backup" : process.argv[2],
     recoveryPacks: process.argv[2] === "backup-packed" ||
       process.env.BACKUP_RECOVERY_PACKS_ENABLED === "true",
@@ -50,6 +58,10 @@ try {
   const safe =
     typeof e.safeCode === "string" && /^[a-z_]+(?:_\d{3})?$/.test(e.safeCode)
       ? e.safeCode
+      : ["TimeoutError", "AbortError"].includes(e.name)
+      ? "provider_transport_timeout"
+      : e.name === "TypeError"
+      ? "provider_transport_or_type_error"
       : "unexpected_error_details_suppressed";
   console.error(
     JSON.stringify({
