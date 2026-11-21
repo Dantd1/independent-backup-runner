@@ -1,7 +1,254 @@
 import { AwsClient } from "aws4fetch";
 import { createHash, createHmac } from "node:crypto";
 import { Buffer } from "node:buffer";
-import { b2Url, requireSafe, sourcePath } from "./core.mjs";
+import process from "node:process";
+import postgres from "postgres";
+import { spawn, spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import {
+  b2Url,
+  DATABASE_CATALOG_SQL,
+  requireSafe,
+  sourcePath,
+  validateDatabaseUrl,
+} from "./core.mjs";
+export const DATABASE_IMAGE = "public.ecr.aws/supabase/postgres:17.6.1.166";
+const quoteIdentifier = (value) => '"' + value.replaceAll('"', '""') + '"';
+
+export async function inspectDatabase(sql, projectRef, role) {
+  requireSafe(
+    /^[a-z0-9]{20}$/.test(projectRef) && projectRef !== "ozryyalyaquujtfaudzi",
+    "database_stage_required",
+  );
+  const [source] = await sql.unsafe(
+    `select current_user as role,current_database() as database,
+    current_setting('server_version_num')::integer as version,
+    current_setting('transaction_read_only') as read_only,
+    (select row_to_json(e) from private.xfinder_environment e where id=1) as marker,
+    (select jsonb_build_object('super',rolsuper,'bypass',rolbypassrls,'createRole',rolcreaterole,'createDb',rolcreatedb,'replication',rolreplication,'expires',rolvaliduntil>clock_timestamp()) from pg_roles where rolname=current_user) as privileges,
+    (select count(*)::integer from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+      where p.prosecdef and n.nspname not in ('pg_catalog','information_schema')
+      and not(n.nspname='extensions' and p.proname='st_estimatedextent' and pg_get_function_identity_arguments(p.oid) in ('text, text','text, text, text','text, text, text, boolean'))
+      and has_function_privilege(current_user,p.oid,'EXECUTE')) as unsafe_definers`,
+  );
+  requireSafe(
+    projectRef !== "ozryyalyaquujtfaudzi" &&
+      source.marker?.environment === "staging" &&
+      source.marker.project_ref === projectRef,
+    "database_environment_denied",
+  );
+  requireSafe(
+    source.role === role &&
+      /^xfinder_db_bak_stg_[0-9]{8}_[a-f0-9]{8}$/.test(role) &&
+      source.database === "postgres" && source.version >= 170000 &&
+      source.version < 180000,
+    "database_identity_denied",
+  );
+  requireSafe(
+    !source.privileges.super && source.privileges.bypass &&
+      !source.privileges.createRole && !source.privileges.createDb &&
+      !source.privileges.replication && source.privileges.expires &&
+      source.read_only === "on" && source.unsafe_definers === 0,
+    "database_privileges_denied",
+  );
+  return source;
+}
+
+// The exported transaction remains open until pg_dump has consumed its snapshot.
+export function captureDatabase(sql, projectRef, role, dump) {
+  requireSafe(
+    /^[a-z0-9]{20}$/.test(projectRef) && projectRef !== "ozryyalyaquujtfaudzi",
+    "database_stage_required",
+  );
+  return sql.begin("isolation level repeatable read read only", async (tx) => {
+    await tx.unsafe(
+      "set local row_security=off;set local search_path=pg_catalog;set local extra_float_digits=3",
+    );
+    await inspectDatabase(tx, projectRef, role);
+    const [snapshot] = await tx.unsafe(
+      "select pg_export_snapshot() as snapshot,clock_timestamp()::text as captured_at",
+    );
+    requireSafe(
+      /^[0-9a-f-]+$/i.test(snapshot.snapshot),
+      "database_snapshot_invalid",
+    );
+    const [{ catalog }] = await tx.unsafe(DATABASE_CATALOG_SQL);
+    const tables = await tx.unsafe(
+      `select n.nspname as schema,c.relname as name from pg_class c join pg_namespace n on n.oid=c.relnamespace where c.relkind in ('r','p') and n.nspname !~ '^pg_' and n.nspname not in ('information_schema','vault','net','cron','pgsodium') order by 1,2`,
+    );
+    const counts = [];
+    for (let start = 0; start < tables.length; start += 20) {
+      const batch = tables.slice(start, start + 20);
+      const rows = await tx.unsafe(
+        batch.map((table, index) =>
+          `select ${index}::integer as item,count(*)::text as rows from ${
+            quoteIdentifier(table.schema)
+          }.${quoteIdentifier(table.name)}`
+        ).join(" union all "),
+      );
+      counts.push(
+        ...rows.map((row) => ({ ...batch[row.item], rows: row.rows })),
+      );
+    }
+    const roles = await tx.unsafe(
+      "select rolname,rolsuper,rolinherit,rolcreaterole,rolcreatedb,rolreplication,rolbypassrls from pg_roles where rolname !~ '^pg_' and rolname<>'postgres' order by rolname",
+    );
+    const memberships = await tx.unsafe(
+      "select parent.rolname as parent,member.rolname as member,m.admin_option,m.inherit_option,m.set_option from pg_auth_members m join pg_roles parent on parent.oid=m.roleid join pg_roles member on member.oid=m.member order by 1,2",
+    );
+    const extensionFunctions = await tx.unsafe(
+      `select n.nspname,p.proname,pg_get_function_identity_arguments(p.oid) as arguments,pg_get_userbyid(p.proowner) as owner from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname in ('public','private','auth','storage','supabase_migrations') and exists(select 1 from pg_depend d where d.classid='pg_proc'::regclass and d.objid=p.oid and d.deptype='e')`,
+    );
+    const bytes = await dump(snapshot.snapshot);
+    return {
+      dump: bytes,
+      context: {
+        format: "xfinder-postgres-context-v1",
+        environment: "staging",
+        projectRef,
+        readerRole: role,
+        capturedAt: new Date(snapshot.captured_at).toISOString(),
+        catalog,
+        counts,
+        roles,
+        memberships,
+        extensionFunctions,
+        excludedTableData: ["vault.*", "net.*", "cron.*", "pgsodium.*"],
+        passwordsExportedAsRoles: false,
+      },
+    };
+  });
+}
+
+async function dockerDump(url, snapshot, ca) {
+  const name = "xfinder-db-dump-" + randomUUID();
+  const env = {
+    ...process.env,
+    PGHOST: url.hostname,
+    PGPORT: url.port || "5432",
+    PGUSER: decodeURIComponent(url.username),
+    PGPASSWORD: decodeURIComponent(url.password),
+    PGDATABASE: "postgres",
+    PGSSLMODE: "verify-full",
+    PGSSLROOTCERT: "/tmp/database-root.crt",
+    DATABASE_SSL_CA: ca,
+    PGOPTIONS:
+      "-c default_transaction_read_only=on -c statement_timeout=120000",
+  };
+  const args = [
+    "run",
+    "--rm",
+    "--name",
+    name,
+    "--network",
+    "host",
+    "--read-only",
+    "--tmpfs",
+    "/tmp:rw,noexec,nosuid,nodev,size=4m,mode=1777",
+    "--user",
+    "postgres",
+    ...[
+      "PGHOST",
+      "PGPORT",
+      "PGUSER",
+      "PGPASSWORD",
+      "PGDATABASE",
+      "PGSSLMODE",
+      "PGSSLROOTCERT",
+      "PGOPTIONS",
+      "DATABASE_SSL_CA",
+    ].flatMap((key) => ["--env", key]),
+    "--entrypoint",
+    "sh",
+    DATABASE_IMAGE,
+    "-c",
+    'umask 077; printf "%s" "$DATABASE_SSL_CA" > "$PGSSLROOTCERT" && exec pg_dump "$@"',
+    "pg_dump",
+    "--format=custom",
+    "--compress=6",
+    "--no-password",
+    "--snapshot=" + snapshot,
+    ...["vault.*", "net.*", "cron.*", "pgsodium.*"].map((value) =>
+      "--exclude-table-data=" + value
+    ),
+  ];
+  try {
+    return await new Promise((resolve, reject) => {
+      const child = spawn("docker", args, {
+        env,
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      const chunks = [];
+      let size = 0, failed = false;
+      const timer = setTimeout(() => {
+        failed = true;
+        child.kill();
+      }, 300000);
+      child.stderr.on("data", () => {});
+      child.stdout.on("data", (chunk) => {
+        size += chunk.length;
+        if (size > 63 * 1024 * 1024) {
+          failed = true;
+          child.kill();
+        } else chunks.push(chunk);
+      });
+      child.on("error", () => {
+        failed = true;
+      });
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        if (failed || code !== 0) {
+          chunks.forEach((chunk) => chunk.fill(0));
+          const error = Error("database_dump_failed");
+          error.safeCode = "database_dump_failed";
+          reject(error);
+        } else {
+          const bytes = Buffer.concat(chunks);
+          chunks.forEach((chunk) => chunk.fill(0));
+          resolve(bytes);
+        }
+      });
+    });
+  } finally {
+    // Only this random, validated container can be removed; no host files exist.
+    requireSafe(
+      /^xfinder-db-dump-[a-f0-9-]{36}$/.test(name),
+      "database_cleanup_denied",
+    );
+    spawnSync("docker", ["rm", "--force", name], {
+      windowsHide: true,
+      stdio: "ignore",
+      timeout: 15000,
+    });
+    env.PGPASSWORD = undefined;
+  }
+}
+
+export function connectDatabase(c) {
+  const { url, role } = validateDatabaseUrl(c.databaseUrl, c.scope.projectRef);
+  const sql = postgres(c.databaseUrl, {
+    max: 1,
+    prepare: false,
+    ssl: { rejectUnauthorized: true, ca: c.databaseCa },
+    onnotice: () => {},
+    connection: {
+      options:
+        "-c default_transaction_read_only=on -c statement_timeout=120000",
+    },
+  });
+  return {
+    inspect: () => inspectDatabase(sql, c.scope.projectRef, role),
+    capture: () =>
+      captureDatabase(
+        sql,
+        c.scope.projectRef,
+        role,
+        (snapshot) => dockerDump(url, snapshot, c.databaseCa),
+      ),
+    close: () => sql.end({ timeout: 2 }),
+  };
+}
 export function signedReadHeaders(id, secret, body, now = Date.now()) {
   const timestamp = String(now);
   return {
@@ -140,6 +387,7 @@ export function connectProviders(c, { fetcher = fetch } = {}) {
       c.B2_READ_KEY_ID,
       c.STORAGE_READER_ID,
       c.SITES_READER_ID,
+      ...(c.databaseRole ? [c.databaseRole] : []),
     ],
     async inventory() {
       await auth("write");
@@ -352,5 +600,13 @@ export function connectProviders(c, { fetcher = fetch } = {}) {
       return { bytes: await boundedBytes(response) };
     },
   };
-  return { storage, r2, kv, b2, close: () => Promise.resolve() };
+  const database = c.databaseUrl ? connectDatabase(c) : undefined;
+  return {
+    storage,
+    r2,
+    kv,
+    b2,
+    database,
+    close: () => database?.close() || Promise.resolve(),
+  };
 }

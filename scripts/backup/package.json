@@ -2,7 +2,9 @@
   "name": "independent-encrypted-backup-runner",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "test": "node --test test/*.test.mjs",
     "inventory": "node run.mjs inventory",
@@ -10,6 +12,7 @@
   },
   "dependencies": {
     "age-encryption": "0.3.1",
-    "aws4fetch": "1.0.20"
+    "aws4fetch": "1.0.20",
+    "postgres": "3.4.7"
   }
 }

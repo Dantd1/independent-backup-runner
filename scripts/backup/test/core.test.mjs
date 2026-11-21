@@ -4,7 +4,13 @@ import { test } from "node:test";
 import { Buffer } from "node:buffer";
 import assert from "node:assert/strict";
 import * as age from "age-encryption";
-import { retrySourceRead } from "../providers.mjs";
+import {
+  captureDatabase,
+  inspectDatabase,
+  retrySourceRead,
+} from "../providers.mjs";
+import { rootCertificates } from "node:tls";
+import { X509Certificate } from "node:crypto";
 import {
   b2Url,
   CAP,
@@ -16,6 +22,8 @@ import {
   requireSpace,
   snapshot,
   sourcePath,
+  validateDatabaseCa,
+  validateDatabaseUrl,
 } from "../core.mjs";
 const scope = {
   environment: "staging",
@@ -132,6 +140,56 @@ test("attempt telemetry is bounded, operational only and blocked when free capac
     recordAttempt(b2, "unexpected"),
     /invalid_attempt_conclusion/,
   );
+});
+
+test("database connections reject production, admin roles, transaction poolers and unsafe URL options", () => {
+  const role = "xfinder_db_bak_stg_20261121_00000001",
+    ref = "a".repeat(20),
+    password = "synthetic-".repeat(8);
+  const url =
+    `postgresql://${role}.${ref}:${password}@aws-0-sa-east-1.pooler.supabase.com:5432/postgres`;
+  assert.equal(validateDatabaseUrl(url, ref).role, role);
+  for (
+    const value of [
+      url.replace(":5432", ":6543"),
+      url + "?options=unsafe",
+      url.replace(role, "postgres"),
+      url.replace(".pooler.supabase.com", ".attacker.invalid"),
+      url.replace("/postgres", "/template1"),
+    ]
+  ) assert.throws(() => validateDatabaseUrl(value, ref));
+  assert.throws(
+    () => validateDatabaseUrl(url, "ozryyalyaquujtfaudzi"),
+    /database_stage_required/,
+  );
+});
+
+test("database CA is required and production is refused before any SQL", async () => {
+  const valid = rootCertificates.find((pem) => {
+    const cert = new X509Certificate(pem);
+    return cert.ca && Date.parse(cert.validFrom) <= Date.now() &&
+      Date.parse(cert.validTo) > Date.now();
+  });
+  assert.equal(validateDatabaseCa(valid), valid);
+  assert.throws(() => validateDatabaseCa("untrusted"), /database_ca_invalid/);
+  let queries = 0;
+  const sql = {
+    unsafe: () => {
+      queries++;
+    },
+    begin: () => {
+      queries++;
+    },
+  };
+  await assert.rejects(
+    inspectDatabase(sql, "ozryyalyaquujtfaudzi", "postgres"),
+    /database_stage_required/,
+  );
+  assert.throws(
+    () => captureDatabase(sql, "ozryyalyaquujtfaudzi", "postgres", () => {}),
+    /database_stage_required/,
+  );
+  assert.equal(queries, 0);
 });
 test("activation, staging scope, independent B2 roles and free-cap guards fail closed", () => {
   assert.equal(configFromEnv(environment()).scope.environment, "staging");
@@ -372,6 +430,76 @@ test("recovery packs preserve v1 records, decrypt completely and reuse stable pa
     ).length,
     1,
   ); // Only fresh KV.
+});
+
+test("database payloads are encrypted, retained and referenced without altering v1 object records", async () => {
+  const f = await fixture(), decrypt = new age.Decrypter();
+  decrypt.addIdentity(f.identity);
+  const clear = Buffer.from("PGDMPsynthetic database archive"),
+    expected = Buffer.from(clear);
+  let inspections = 0, captures = 0;
+  const database = {
+    inspect: async () => {
+      inspections++;
+    },
+    capture: async () => {
+      captures++;
+      return {
+        dump: clear,
+        context: {
+          environment: "staging",
+          projectRef: scope.projectRef,
+          capturedAt: new Date(f.now).toISOString(),
+          counts: [{ schema: "public", name: "synthetic", rows: "1" }],
+          roles: [{ rolname: "synthetic", rolsuper: false }],
+        },
+      };
+    },
+  };
+  const result = await snapshot({ ...f, database });
+  const manifest = JSON.parse(
+    await decrypt.decrypt(f.payloads.get(result.manifest), "text"),
+  );
+  assert.equal(inspections, 1);
+  assert.equal(captures, 1);
+  assert.equal(manifest.format, "xfinder-age-backup-v1");
+  assert.equal(manifest.records.length, 3);
+  assert.equal(manifest.database.format, "xfinder-postgres-backup-v1");
+  assert.deepEqual(
+    Buffer.from(
+      await decrypt.decrypt(f.payloads.get(manifest.database.dump.object)),
+    ),
+    expected,
+  );
+  assert.equal(manifest.database.dump.digest, digest(expected));
+  assert.ok(clear.every((byte) => byte === 0));
+  assert.equal(f.files.get(manifest.database.dump.object).mode, "compliance");
+  const health = JSON.parse(f.payloads.get("staging/health/success.json"));
+  assert.equal(health.databaseTables, 1);
+  assert.equal(health.databaseCapturedAt, new Date(f.now).toISOString());
+});
+
+test("inventory never captures database data; capture failure never publishes success", async () => {
+  const f = await fixture();
+  let calls = 0;
+  const database = {
+    inspect: async () => {},
+    capture: async () => {
+      calls++;
+      throw Error("synthetic database unavailable");
+    },
+  };
+  await snapshot({ ...f, database, mode: "inventory" });
+  assert.equal(calls, 0);
+  assert.equal(f.writes.length, 0);
+  await assert.rejects(snapshot({ ...f, database }));
+  assert.equal(calls, 1);
+  assert.equal(
+    f.writes.some((name) =>
+      name.endsWith("/manifest.age") || name === "staging/health/success.json"
+    ),
+    false,
+  );
 });
 
 test("packing refuses changed source bytes and never commits partial packs as success", async () => {

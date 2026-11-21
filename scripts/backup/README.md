@@ -29,6 +29,16 @@ downloading every legacy object where the account has daily request limits.
 
 ## Activation requirements
 
+Optional database capture uses `DATABASE_BACKUP_ENABLED=true` only after its
+dedicated reader, `DATABASE_READER_URL`, trusted public `DATABASE_SSL_CA`,
+encrypted credential escrow and independent database-age monitoring have been
+validated. It uses the pinned PostgreSQL Docker client, a consistent read-only
+snapshot, RAM-only custom dump and encrypted context. Vault/key/queue/scheduler
+data are excluded. Managed tables require a privileged full-read role; its wider
+technical read scope must be explicitly accepted. No administrative URI is
+accepted. An absent database gate preserves the existing file-only behavior and
+schedule.
+
 Do not enable a scheduler until provider billing restrictions, source scopes,
 credential registry records, encrypted credential recovery and the independent
 watchdog have been validated. `BACKUP_ZERO_COST_VERIFIED=true` records that

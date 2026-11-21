@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomUUID, X509Certificate } from "node:crypto";
 import { Buffer } from "node:buffer";
 export const CAP = 9_000_000_000;
 export const DAY = 86400000;
@@ -142,8 +142,97 @@ export function configFromEnv(env) {
     config.B2_READ_KEY_ID !== config.B2_WRITE_KEY_ID,
     "shared_b2_key_rejected",
   );
+  if (env.DATABASE_BACKUP_ENABLED === "true") {
+    config.databaseUrl = env.DATABASE_READER_URL;
+    config.databaseRole =
+      validateDatabaseUrl(config.databaseUrl, scope.projectRef).role;
+    config.databaseCa = validateDatabaseCa(env.DATABASE_SSL_CA);
+  }
   return config;
 }
+
+export function validateDatabaseCa(value) {
+  requireSafe(
+    typeof value === "string" && value.length <= 16384 &&
+      /^-----BEGIN CERTIFICATE-----\r?\n[A-Za-z0-9+/=\r\n]+-----END CERTIFICATE-----\s*$/
+        .test(value),
+    "database_ca_invalid",
+  );
+  let certificate;
+  try {
+    certificate = new X509Certificate(value);
+  } catch {
+    requireSafe(false, "database_ca_invalid");
+  }
+  requireSafe(
+    certificate.ca && Date.parse(certificate.validFrom) <= Date.now() &&
+      Date.parse(certificate.validTo) > Date.now(),
+    "database_ca_invalid",
+  );
+  return value;
+}
+
+export function validateDatabaseUrl(value, projectRef) {
+  requireSafe(
+    /^[a-z0-9]{20}$/.test(projectRef) && projectRef !== "ozryyalyaquujtfaudzi",
+    "database_stage_required",
+  );
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    requireSafe(false, "database_configuration_invalid");
+  }
+  let username, password;
+  try {
+    username = decodeURIComponent(url.username);
+    password = decodeURIComponent(url.password);
+  } catch {
+    requireSafe(false, "database_configuration_invalid");
+  }
+  const pooler = url.hostname.endsWith(".pooler.supabase.com");
+  const role = pooler ? username.slice(0, -(projectRef.length + 1)) : username;
+  requireSafe(
+    ["postgres:", "postgresql:"].includes(url.protocol) &&
+      url.pathname === "/postgres" && !url.search && !url.hash &&
+      (!url.port || url.port === "5432"),
+    "database_configuration_invalid",
+  );
+  requireSafe(
+    pooler
+      ? /^aws-[0-9]+-[a-z0-9-]+\.pooler\.supabase\.com$/.test(url.hostname) &&
+        username === role + "." + projectRef
+      : url.hostname === "db." + projectRef + ".supabase.co",
+    "database_origin_rejected",
+  );
+  requireSafe(
+    /^xfinder_db_bak_stg_[0-9]{8}_[a-f0-9]{8}$/.test(role) &&
+      password.length >= 48,
+    "database_reader_rejected",
+  );
+  return { url, role };
+}
+
+export const DATABASE_SCHEMAS = [
+  "public",
+  "private",
+  "auth",
+  "storage",
+  "supabase_migrations",
+];
+const DB_NAMES = DATABASE_SCHEMAS.map((name) => "'" + name + "'").join(",");
+export const DATABASE_CATALOG_SQL = `select jsonb_build_object(
+ 'locale',(select jsonb_build_array(datcollate,datctype,datlocprovider,datlocale,pg_encoding_to_char(encoding),datcollversion) from pg_database where datname=current_database()),
+ 'extensions',(select jsonb_agg(jsonb_build_array(extname,extversion) order by extname) from pg_extension),
+ 'tables',(select jsonb_agg(jsonb_build_array(n.nspname,c.relname,c.relrowsecurity,c.relforcerowsecurity,pg_get_userbyid(c.relowner),
+ has_table_privilege('anon',c.oid,'SELECT'),has_table_privilege('anon',c.oid,'INSERT'),has_table_privilege('anon',c.oid,'UPDATE'),has_table_privilege('anon',c.oid,'DELETE'),
+ has_table_privilege('authenticated',c.oid,'SELECT'),has_table_privilege('authenticated',c.oid,'INSERT'),has_table_privilege('authenticated',c.oid,'UPDATE'),has_table_privilege('authenticated',c.oid,'DELETE'),has_table_privilege('service_role',c.oid,'SELECT')) order by n.nspname,c.relname)
+ from pg_class c join pg_namespace n on n.oid=c.relnamespace where n.nspname in (${DB_NAMES}) and c.relkind in ('r','p')),
+ 'columns',(select jsonb_agg(jsonb_build_array(table_schema,table_name,column_name,data_type,is_nullable,column_default) order by table_schema,table_name,ordinal_position) from information_schema.columns where table_schema in (${DB_NAMES})),
+ 'policies',(select jsonb_agg(jsonb_build_array(schemaname,tablename,policyname,permissive,roles,cmd,qual,with_check) order by schemaname,tablename,policyname) from pg_policies where schemaname in (${DB_NAMES})),
+ 'functions',(select jsonb_agg(jsonb_build_array(n.nspname,p.proname,pg_get_function_identity_arguments(p.oid),p.prosrc,p.prosecdef,p.proconfig,pg_get_userbyid(p.proowner),has_function_privilege('anon',p.oid,'EXECUTE'),has_function_privilege('authenticated',p.oid,'EXECUTE'),has_function_privilege('service_role',p.oid,'EXECUTE')) order by n.nspname,p.proname,pg_get_function_identity_arguments(p.oid)) from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname in (${DB_NAMES})),
+ 'constraints',(select jsonb_agg(jsonb_build_array(n.nspname,c.relname,k.conname,pg_get_constraintdef(k.oid)) order by n.nspname,c.relname,k.conname) from pg_constraint k join pg_class c on c.oid=k.conrelid join pg_namespace n on n.oid=c.relnamespace where n.nspname in (${DB_NAMES})),
+ 'migrations',(select jsonb_agg(version order by version) from supabase_migrations.schema_migrations)) as catalog`;
 // Provider XML is parsed without DTDs, external entities, or recursive entity expansion.
 export function xmlText(value) {
   requireSafe(!/<!DOCTYPE|<!ENTITY/i.test(value), "unsafe_xml");
@@ -204,6 +293,7 @@ export async function snapshot(
     now = Date.now(),
     mode = "backup",
     recoveryPacks = false,
+    database,
     log = () => {},
   },
 ) {
@@ -279,7 +369,7 @@ export async function snapshot(
         "source_size_limit",
       );
       return n + size + 2048;
-    }, 0) + 16 * 1024 * 1024;
+    }, 0) + 16 * 1024 * 1024 + (database ? 80 * 1024 * 1024 : 0);
   requireSpace(used, estimate);
   for (const bucket of catalog.buckets.filter((b) => !b.public)) {
     const item = catalog.objects.find((i) => i.bucket === bucket.id);
@@ -296,6 +386,7 @@ export async function snapshot(
     requireSafe(probe.bytes.length === cloud[0].size, "r2_preflight_size");
   }
   if (keys.length) await kv.read(keys[0]);
+  if (database) await database.inspect();
   const preflight = {
     environment: "staging",
     mode,
@@ -330,6 +421,69 @@ export async function snapshot(
     return file;
   }
   for (const name of material) await preserve(existing.files.get(name));
+  let databaseCopy;
+  if (database) {
+    const captured = await database.capture();
+    let contextBytes;
+    try {
+      requireSafe(
+        captured.dump instanceof Uint8Array && captured.dump.length > 5 &&
+          captured.dump.length <= 63 * 1024 * 1024 &&
+          Buffer.from(captured.dump.subarray(0, 5)).toString() === "PGDMP",
+        "database_dump_invalid",
+      );
+      requireSafe(
+        captured.context?.environment === "staging" &&
+          captured.context.projectRef === scope.projectRef &&
+          captured.context.counts?.length > 0 &&
+          captured.context.roles?.every((role) =>
+            !Object.keys(role).some((key) => /password|secret|token/i.test(key))
+          ),
+        "database_context_invalid",
+      );
+      requireSafe(
+        Number.isFinite(Date.parse(captured.context.capturedAt)) &&
+          Date.parse(captured.context.capturedAt) <= Date.now() + 300000,
+        "database_capture_time_invalid",
+      );
+      contextBytes = Buffer.from(JSON.stringify(captured.context));
+      requireSafe(
+        contextBytes.length <= 16 * 1024 * 1024,
+        "database_context_size_limit",
+      );
+      const dumpObject = "staging/database/" + runId + "/database.dump.age";
+      const contextObject = "staging/database/" + runId + "/context.age";
+      const dumpHash = digest(captured.dump),
+        contextHash = digest(contextBytes);
+      const dumpFile = await upload(
+        dumpObject,
+        await encrypter.encrypt(captured.dump),
+        undefined,
+        0,
+      );
+      const contextFile = await upload(
+        contextObject,
+        await encrypter.encrypt(contextBytes),
+        undefined,
+        0,
+      );
+      databaseCopy = {
+        format: "xfinder-postgres-backup-v1",
+        projectRef: scope.projectRef,
+        capturedAt: captured.context.capturedAt,
+        tables: captured.context.counts.length,
+        dump: { object: dumpObject, size: dumpFile.size, digest: dumpHash },
+        context: {
+          object: contextObject,
+          size: contextFile.size,
+          digest: contextHash,
+        },
+      };
+    } finally {
+      captured.dump?.fill(0);
+      contextBytes?.fill(0);
+    }
+  }
   await Promise.all(Array.from({ length: 4 }, (_, slot) =>
     (async () => {
       try {
@@ -542,6 +696,7 @@ export async function snapshot(
     },
     buckets: catalog.buckets,
     records: out,
+    ...(databaseCopy ? { database: databaseCopy } : {}),
     ...(recoveryPacks ? { recoveryPacks: packs } : {}),
     recovery: { object: recovery },
     credentialCopies: b2.keyIds.map((keyId) => ({
@@ -578,6 +733,9 @@ export async function snapshot(
       ...out.map((r) => r.destination.object),
       ...packs.map((pack) => pack.object),
       manifestName,
+      ...(databaseCopy
+        ? [databaseCopy.dump.object, databaseCopy.context.object]
+        : []),
     ]
   ) {
     const file = verified.files.get(name);
@@ -594,6 +752,12 @@ export async function snapshot(
     records: records.length,
     storedBytes: used,
     capacityWarning: used >= 8_000_000_000,
+    ...(databaseCopy
+      ? {
+        databaseCapturedAt: databaseCopy.capturedAt,
+        databaseTables: databaseCopy.tables,
+      }
+      : {}),
   };
   // This contains only operational counters/time, so an independent watchdog needs no recovery key.
   const healthBytes = Buffer.from(JSON.stringify(health));
