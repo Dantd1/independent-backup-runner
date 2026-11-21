@@ -5,6 +5,7 @@ import process from "node:process";
 import postgres from "postgres";
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { lookup } from "node:dns/promises";
 import {
   b2Url,
   DATABASE_CATALOG_SQL,
@@ -171,9 +172,29 @@ export function captureDatabase(
 
 async function dockerDump(url, snapshot, ca, signal) {
   const name = "xfinder-db-dump-" + randomUUID();
+  let hostAddress;
+  if (url.hostname.endsWith(".pooler.supabase.com")) {
+    let timer;
+    try {
+      const answer = await Promise.race([
+        lookup(url.hostname, { family: 4 }),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(Error("dns_timeout")), 10000);
+        }),
+      ]);
+      hostAddress = answer.address;
+    } catch {
+      const error = Error("database_dns_unavailable");
+      error.safeCode = "database_dns_unavailable";
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
   const env = {
     ...process.env,
     PGHOST: url.hostname,
+    ...(hostAddress ? { PGHOSTADDR: hostAddress } : {}),
     PGPORT: url.port || "5432",
     PGUSER: decodeURIComponent(url.username),
     PGPASSWORD: decodeURIComponent(url.password),
@@ -199,6 +220,7 @@ async function dockerDump(url, snapshot, ca, signal) {
     "postgres",
     ...[
       "PGHOST",
+      ...(hostAddress ? ["PGHOSTADDR"] : []),
       "PGPORT",
       "PGUSER",
       "PGPASSWORD",
@@ -213,11 +235,12 @@ async function dockerDump(url, snapshot, ca, signal) {
     "sh",
     DATABASE_IMAGE,
     "-c",
-    'umask 077; printf "%s" "$DATABASE_SSL_CA" > "$PGSSLROOTCERT" && exec pg_dump "$@"',
+    'umask 077; printf "%s" "$DATABASE_SSL_CA" > "$PGSSLROOTCERT" && printf "xfinder-client-ready\\n" >&2 && exec pg_dump "$@"',
     "pg_dump",
     "--format=custom",
     "--compress=6",
     "--no-password",
+    "--verbose",
     "--snapshot=" + snapshot,
     ...["vault.*", "net.*", "cron.*", "pgsodium.*"].map((value) =>
       "--exclude-table-data=" + value
@@ -236,6 +259,20 @@ async function dockerDump(url, snapshot, ca, signal) {
       };
       const chunks = [];
       let size = 0, failed = false, diagnostic = "";
+      let clientStarted = false, clientConnected = false;
+      let deadlineCode;
+      const startupDeadline = setTimeout(() => {
+        if (!clientStarted) {
+          deadlineCode = "database_client_start_timeout";
+          stop();
+        }
+      }, 30000);
+      const connectDeadline = setTimeout(() => {
+        if (!clientConnected) {
+          deadlineCode = "database_client_connect_timeout";
+          stop();
+        }
+      }, 60000);
       const timer = setTimeout(() => {
         failed = true;
         child.kill();
@@ -243,9 +280,18 @@ async function dockerDump(url, snapshot, ca, signal) {
       signal?.addEventListener("abort", stop, { once: true });
       if (signal?.aborted) stop();
       child.stderr.on("data", (chunk) => {
-        if (diagnostic.length < 8192) {
-          diagnostic += chunk.toString().slice(0, 8192 - diagnostic.length);
+        const part = chunk.toString();
+        if (!clientStarted && part.includes("xfinder-client-ready")) {
+          clientStarted = true;
+          console.log(JSON.stringify({ phase: "database_client_started" }));
         }
+        if (
+          !clientConnected && /pg_dump: (reading|last built-in OID)/.test(part)
+        ) {
+          clientConnected = true;
+          console.log(JSON.stringify({ phase: "database_client_connected" }));
+        }
+        diagnostic = (diagnostic + part).slice(-8192);
       });
       child.stdout.on("data", (chunk) => {
         size += chunk.length;
@@ -259,24 +305,27 @@ async function dockerDump(url, snapshot, ca, signal) {
       });
       child.on("close", (code) => {
         signal?.removeEventListener("abort", stop);
+        clearTimeout(startupDeadline);
+        clearTimeout(connectDeadline);
         clearTimeout(timer);
         if (failed || code !== 0) {
           chunks.forEach((chunk) => chunk.fill(0));
           const error = Error("database_dump_failed");
-          error.safeCode = /password authentication failed/i.test(diagnostic)
-            ? "database_dump_authentication_failed"
-            : /certificate|SSL error/i.test(diagnostic)
-            ? "database_dump_tls_failed"
-            : /too many connections|connection limit/i.test(diagnostic)
-            ? "database_dump_connection_limit"
-            : /permission denied/i.test(diagnostic)
-            ? "database_dump_permission_denied"
-            : /invalid snapshot|snapshot.*does not exist/i.test(diagnostic)
-            ? "database_dump_snapshot_failed"
-            : /timeout|timed out|connection refused|could not connect|network is unreachable/i
-                .test(diagnostic)
-            ? "database_dump_connect_failed"
-            : "database_dump_failed";
+          error.safeCode = deadlineCode ??
+            (/password authentication failed/i.test(diagnostic)
+              ? "database_dump_authentication_failed"
+              : /certificate|SSL error/i.test(diagnostic)
+              ? "database_dump_tls_failed"
+              : /too many connections|connection limit/i.test(diagnostic)
+              ? "database_dump_connection_limit"
+              : /permission denied/i.test(diagnostic)
+              ? "database_dump_permission_denied"
+              : /invalid snapshot|snapshot.*does not exist/i.test(diagnostic)
+              ? "database_dump_snapshot_failed"
+              : /timeout|timed out|connection refused|could not connect|network is unreachable/i
+                  .test(diagnostic)
+              ? "database_dump_connect_failed"
+              : "database_dump_failed");
           diagnostic = "";
           reject(error);
         } else {
