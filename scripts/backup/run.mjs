@@ -12,9 +12,11 @@ try {
     ...providers,
     scope: config.scope,
     encrypter: cipher,
-    mode: process.argv[2],
+    mode: process.argv[2] === "backup-packed" ? "backup" : process.argv[2],
+    recoveryPacks: process.argv[2] === "backup-packed" ||
+      process.env.BACKUP_RECOVERY_PACKS_ENABLED === "true",
   });
-  if (process.argv[2] === "backup") {
+  if (["backup", "backup-packed"].includes(process.argv[2])) {
     await recordAttempt(providers.b2, "success").catch(() => {
       console.warn(
         JSON.stringify({
@@ -34,7 +36,7 @@ try {
     }),
   );
 } catch (e) {
-  if (providers && process.argv[2] === "backup") {
+  if (providers && ["backup", "backup-packed"].includes(process.argv[2])) {
     await recordAttempt(providers.b2, "failure").catch(() => {
       console.warn(
         JSON.stringify({

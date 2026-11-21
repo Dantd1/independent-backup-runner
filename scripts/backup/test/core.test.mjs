@@ -274,6 +274,80 @@ test("encrypted snapshot restores all fixture sources, then reuses unchanged blo
   assert.equal(second.stats.uploaded, 3); // Fresh KV, manifest, health.
   assert.ok(f.extensions.length >= 5);
 });
+
+test("recovery packs preserve v1 records, decrypt completely and reuse stable partitions", async () => {
+  const f = await fixture(), decrypt = new age.Decrypter();
+  decrypt.addIdentity(f.identity);
+  const first = await snapshot({ ...f, recoveryPacks: true });
+  const manifest = JSON.parse(
+    await decrypt.decrypt(f.payloads.get(first.manifest), "text"),
+  );
+  assert.equal(manifest.format, "xfinder-age-backup-v1");
+  assert.equal(manifest.recoveryPacks.length, 3);
+  const covered = new Set();
+  for (const pack of manifest.recoveryPacks) {
+    const bytes = await decrypt.decrypt(f.payloads.get(pack.object));
+    for (const part of pack.parts) {
+      assert.equal(
+        digest(bytes.subarray(part.offset, part.offset + part.length)),
+        manifest.records[part.index].destination.sourceDigest,
+      );
+      covered.add(part.index);
+    }
+    assert.equal(f.files.get(pack.object).mode, "compliance");
+  }
+  assert.equal(covered.size, manifest.records.length);
+  for (const record of manifest.records) {
+    assert.equal(
+      digest(await decrypt.decrypt(f.payloads.get(record.destination.object))),
+      record.destination.sourceDigest,
+    );
+  }
+  const priorWrites = f.writes.length;
+  await snapshot({ ...f, recoveryPacks: true, now: f.now + 2 * DAY });
+  assert.equal(
+    f.writes.slice(priorWrites).filter((name) =>
+      name.startsWith("staging/recovery-packs/")
+    ).length,
+    1,
+  ); // Only fresh KV.
+});
+
+test("packing refuses changed source bytes and never commits partial packs as success", async () => {
+  const f = await fixture(), read = f.storage.read;
+  let reads = 0;
+  f.storage.read = async () =>
+    ++reads >= 3 ? { bytes: Buffer.from("changed") } : read();
+  await assert.rejects(
+    snapshot({ ...f, recoveryPacks: true }),
+    /recovery_pack_source_changed/,
+  );
+  assert.equal(
+    f.writes.some((name) =>
+      name.endsWith("/manifest.age") || name === "staging/health/success.json"
+    ),
+    false,
+  );
+});
+
+test("additional archived credentials retain compliance without changing legacy credentialCopies", async () => {
+  const f = await fixture(), object = "staging/credentials/synthetic-extra.age";
+  f.files.set(object, {
+    id: object,
+    name: object,
+    size: 10,
+    mode: "compliance",
+    until: f.now + DAY,
+  });
+  const result = await snapshot(f), decrypt = new age.Decrypter();
+  decrypt.addIdentity(f.identity);
+  const manifest = JSON.parse(
+    await decrypt.decrypt(f.payloads.get(result.manifest), "text"),
+  );
+  assert.equal(manifest.credentialCopies.length, 2);
+  assert.equal(manifest.additionalCredentialCopies[0].object, object);
+  assert.ok(f.extensions.includes(object));
+});
 test("source failure retains uploaded blobs but never commits a manifest or health marker", async () => {
   const f = await fixture(), read = f.kv.read;
   let calls = 0;

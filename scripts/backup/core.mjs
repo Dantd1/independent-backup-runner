@@ -203,6 +203,7 @@ export async function snapshot(
     encrypter,
     now = Date.now(),
     mode = "backup",
+    recoveryPacks = false,
     log = () => {},
   },
 ) {
@@ -258,9 +259,14 @@ export async function snapshot(
     ciphertextSamples: 0,
   };
   const recovery = scope.recoveryObject;
+  const extraCredentials = [...existing.files.keys()].filter((name) =>
+    /^staging\/credentials\/[a-zA-Z0-9_-]+\.age$/.test(name) &&
+    !b2.keyIds.some((id) => name === "staging/credentials/" + id + ".age")
+  );
   const material = [
     recovery,
     ...b2.keyIds.map((id) => "staging/credentials/" + id + ".age"),
+    ...extraCredentials,
   ];
   for (const name of material) {
     requireSafe(existing.files.has(name), "recovery_material_not_archived");
@@ -302,6 +308,7 @@ export async function snapshot(
     return { status: "inventory_verified", ...preflight };
   }
   const sources = { storage, r2, kv };
+  const kvCapture = new Map();
   const out = new Array(records.length), samples = [];
   let next = 0, done = 0, failure;
   async function preserve(file) {
@@ -365,6 +372,9 @@ export async function snapshot(
             }
             const hash = digest(bytes),
               ciphertext = await encrypter.encrypt(bytes);
+            if (record.kind === "kv" && recoveryPacks) {
+              kvCapture.set(index, Buffer.from(bytes));
+            }
             const file = await upload(record.name, ciphertext, hash, slot);
             destination = {
               object: record.name,
@@ -388,6 +398,121 @@ export async function snapshot(
       }
     })()));
   if (failure) throw failure;
+  const packs = [];
+  if (recoveryPacks) {
+    // Stable hash partitions avoid repacking the whole collection on one edit.
+    // The encrypted v1 records remain usable by legacy restore tools.
+    const partitions = new Map();
+    for (const [index, record] of out.entries()) {
+      const partition = record.kind + "/" +
+        record.destination.object.split("/").at(-1).slice(0, 2);
+      if (!partitions.has(partition)) partitions.set(partition, []);
+      partitions.get(partition).push({ index, record });
+    }
+    const groups = [];
+    for (const entries of partitions.values()) {
+      entries.sort((a, b) =>
+        a.record.destination.object.localeCompare(b.record.destination.object)
+      );
+      let group = [], size = 0;
+      for (const entry of entries) {
+        const bytes = entry.record.kind === "kv"
+          ? kvCapture.get(entry.index)?.length
+          : Number(entry.record.source.size);
+        requireSafe(
+          Number.isSafeInteger(bytes) && bytes >= 0 && bytes < 64 * 1024 * 1024,
+          "recovery_pack_source_size",
+        );
+        if (group.length && size + bytes > 32 * 1024 * 1024) {
+          groups.push(group);
+          group = [];
+          size = 0;
+        }
+        group.push({ ...entry, bytes });
+        size += bytes;
+      }
+      if (group.length) groups.push(group);
+    }
+    requireSafe(groups.length <= 1500, "recovery_pack_request_limit");
+    const planned = groups.map((group) => {
+      const identity = group.map((
+        { record, bytes },
+      ) => [record.destination.object, record.destination.sourceDigest, bytes]);
+      return {
+        group,
+        object: "staging/recovery-packs/" + digest(JSON.stringify(identity)) +
+          ".age",
+      };
+    });
+    requireSpace(
+      used,
+      planned.filter((p) => !existing.files.has(p.object)).reduce(
+        (sum, p) => sum + p.group.reduce((n, e) => n + e.bytes, 0) + 8192,
+        0,
+      ),
+    );
+    let packIndex = 0;
+    await Promise.all(Array.from({ length: 2 }, (_, slot) =>
+      (async () => {
+        while (!failure) {
+          const index = packIndex++;
+          if (index >= planned.length) return;
+          try {
+            const { group, object } = planned[index];
+            let offset = 0;
+            const parts = group.map((entry) => {
+              const part = { index: entry.index, offset, length: entry.bytes };
+              offset += entry.bytes;
+              return part;
+            });
+            const old = existing.files.get(object);
+            let size;
+            if (old) {
+              await preserve(old);
+              size = old.size;
+            } else {
+              const buffers = [];
+              for (let start = 0; start < group.length; start += 4) {
+                const batch = await Promise.all(
+                  group.slice(start, start + 4).map(
+                    async (
+                      { index: recordIndex, record, bytes: expectedSize },
+                    ) => {
+                      const data = record.kind === "kv"
+                        ? kvCapture.get(recordIndex)
+                        : (await sources[record.kind].read(record.source))
+                          .bytes;
+                      requireSafe(
+                        data.length === expectedSize &&
+                          digest(data) === record.destination.sourceDigest,
+                        "recovery_pack_source_changed",
+                      );
+                      return Buffer.from(data);
+                    },
+                  ),
+                );
+                buffers.push(...batch);
+              }
+              const clear = Buffer.concat(buffers);
+              buffers.forEach((buffer) => buffer.fill(0));
+              const encrypted = await encrypter.encrypt(clear);
+              const packHash = digest(clear);
+              clear.fill(0);
+              size = (await upload(object, encrypted, packHash, slot)).size;
+            }
+            packs[index] = { object, size, parts };
+            log({
+              phase: "recovery_pack",
+              completed: packs.filter(Boolean).length,
+              total: planned.length,
+            });
+          } catch (error) {
+            failure ||= error;
+          }
+        }
+      })()));
+    if (failure) throw failure;
+  }
   requireSafe(
     JSON.stringify(catalog) === JSON.stringify(await storage.list()),
     "storage_changed_during_backup",
@@ -417,11 +542,20 @@ export async function snapshot(
     },
     buckets: catalog.buckets,
     records: out,
+    ...(recoveryPacks ? { recoveryPacks: packs } : {}),
     recovery: { object: recovery },
     credentialCopies: b2.keyIds.map((keyId) => ({
       keyId,
       object: "staging/credentials/" + keyId + ".age",
     })),
+    ...(extraCredentials.length
+      ? {
+        additionalCredentialCopies: extraCredentials.map((object) => ({
+          keyId: object.split("/").at(-1).slice(0, -4),
+          object,
+        })),
+      }
+      : {}),
     retentionUntil: new Date(minimumUntil).toISOString(),
     captureConsistency: {
       storageCatalogStable: true,
@@ -442,6 +576,7 @@ export async function snapshot(
     const name of [
       ...material,
       ...out.map((r) => r.destination.object),
+      ...packs.map((pack) => pack.object),
       manifestName,
     ]
   ) {

@@ -12,7 +12,7 @@ on:
     inputs:
       mode:
         type: choice
-        options: [selftest, inventory, backup]
+        options: [selftest, inventory, backup, backup-packed]
         default: selftest
 permissions:
   contents: read
@@ -42,6 +42,7 @@ jobs:
         env:
           XFINDER_ENVIRONMENT: staging
           BACKUP_ZERO_COST_VERIFIED: ${{ vars.BACKUP_ZERO_COST_VERIFIED }}
+          BACKUP_RECOVERY_PACKS_ENABLED: ${{ vars.BACKUP_RECOVERY_PACKS_ENABLED }}
           BACKUP_SCOPE_JSON: ${{ secrets.BACKUP_SCOPE_JSON }}
           STORAGE_READER_ID: ${{ secrets.STORAGE_READER_ID }}
           STORAGE_READER_KEY: ${{ secrets.STORAGE_READER_KEY }}

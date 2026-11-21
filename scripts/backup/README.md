@@ -12,6 +12,21 @@ creates an age encrypted manifest only after copying and source-stability
 checks. Public logs contain status/error codes only, not inventory, paths,
 configuration or secrets.
 
+`node run.mjs backup-packed` additionally creates encrypted recovery packs.
+The v1 per-object records remain present for older recovery tools. Packs use
+stable hash partitions, normally at most 32 MiB of plaintext per pack, and are
+reused and protected by the same retention/capacity guards. Their membership,
+offsets and integrity information exist only inside the encrypted manifest.
+Source bytes are checked against the original records before packing, and the
+source inventories are compared again before committing success. A maximum of
+1,500 packs bounds the number of requests for a complete restore.
+
+Scheduled mode keeps its existing behavior unless the separately reviewed
+`BACKUP_RECOVERY_PACKS_ENABLED=true` variable is installed. Trial packed mode
+does not change the schedule or free provider caps. Additional ciphertext counts
+toward the 9 GB account guard. Full restoration must use the packs instead of
+downloading every legacy object where the account has daily request limits.
+
 ## Activation requirements
 
 Do not enable a scheduler until provider billing restrictions, source scopes,
