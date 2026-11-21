@@ -432,6 +432,49 @@ test("recovery packs preserve v1 records, decrypt completely and reuse stable pa
   ); // Only fresh KV.
 });
 
+test("packed retention renews complete restore packs within quota without changing legacy locks", async () => {
+  const f = await fixture(), decrypt = new age.Decrypter();
+  decrypt.addIdentity(f.identity);
+  const first = await snapshot({ ...f, recoveryPacks: true });
+  const before = JSON.parse(
+    await decrypt.decrypt(f.payloads.get(first.manifest), "text"),
+  );
+  const legacy = before.records.map((r) => ({
+    object: r.destination.object,
+    until: f.files.get(r.destination.object).until,
+  }));
+  const next = await snapshot({
+    ...f,
+    recoveryPacks: true,
+    now: f.now + 2 * DAY,
+  });
+  const after = JSON.parse(
+    await decrypt.decrypt(f.payloads.get(next.manifest), "text"),
+  );
+  assert.equal(after.retentionBasis, "complete-recovery-packs");
+  assert.equal(
+    f.extensions.some((name) => name.startsWith("staging/objects/")),
+    false,
+  );
+  for (const item of legacy) {
+    assert.ok(f.payloads.has(item.object));
+    assert.equal(f.files.get(item.object).until, item.until);
+  }
+  for (const pack of after.recoveryPacks) {
+    assert.ok(f.files.get(pack.object).until >= f.now + 32 * DAY);
+  }
+  assert.ok(f.extensions.length <= before.recoveryPacks.length + 3);
+  for (const pack of after.recoveryPacks) {
+    const bytes = await decrypt.decrypt(f.payloads.get(pack.object));
+    for (const part of pack.parts) {
+      assert.equal(
+        digest(bytes.subarray(part.offset, part.offset + part.length)),
+        after.records[part.index].destination.sourceDigest,
+      );
+    }
+  }
+});
+
 test("database payloads are encrypted, retained and referenced without altering v1 object records", async () => {
   const f = await fixture(), decrypt = new age.Decrypter();
   decrypt.addIdentity(f.identity);

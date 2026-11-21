@@ -257,6 +257,7 @@ async function dockerDump(url, snapshot, ca, signal, { probe = false } = {}) {
         "--compress=6",
         "--no-password",
         "--verbose",
+        "--lock-wait-timeout=120s",
         "--snapshot=" + snapshot,
         ...["vault.*", "net.*", "cron.*", "pgsodium.*"].map((value) =>
           "--exclude-table-data=" + value
@@ -295,6 +296,7 @@ async function dockerDump(url, snapshot, ca, signal, { probe = false } = {}) {
         }
       }, 60000);
       const timer = setTimeout(() => {
+        deadlineCode = "database_dump_timeout";
         failed = true;
         child.kill("SIGKILL");
       }, 900000);
@@ -343,6 +345,7 @@ async function dockerDump(url, snapshot, ca, signal, { probe = false } = {}) {
         if (probe && chunk.toString().trim() === "1") clientConnected = true;
         size += chunk.length;
         if (size > 63 * 1024 * 1024) {
+          deadlineCode = "database_dump_size_limit";
           failed = true;
           child.kill("SIGKILL");
         } else chunks.push(chunk);

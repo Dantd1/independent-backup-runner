@@ -493,7 +493,13 @@ export async function snapshot(
           const record = records[index], old = existing.files.get(record.name);
           let destination;
           if (old) {
-            await preserve(old);
+            // Packed restores cover every record. Renew the pack lock once,
+            // instead of thousands of legacy locks on the daily free quota.
+            if (!recoveryPacks) await preserve(old);
+            else {requireSafe(
+                old.mode === "compliance",
+                "existing_object_unprotected",
+              );}
             requireSafe(
               typeof old.sourceDigest === "string",
               "missing_source_integrity",
@@ -666,6 +672,14 @@ export async function snapshot(
         }
       })()));
     if (failure) throw failure;
+    const covered = new Set();
+    for (const pack of packs) {
+      for (const part of pack.parts) {
+        requireSafe(!covered.has(part.index), "duplicate_recovery_pack_member");
+        covered.add(part.index);
+      }
+    }
+    requireSafe(covered.size === out.length, "incomplete_recovery_packs");
   }
   requireSafe(
     JSON.stringify(catalog) === JSON.stringify(await storage.list()),
@@ -698,6 +712,9 @@ export async function snapshot(
     records: out,
     ...(databaseCopy ? { database: databaseCopy } : {}),
     ...(recoveryPacks ? { recoveryPacks: packs } : {}),
+    retentionBasis: recoveryPacks
+      ? "complete-recovery-packs"
+      : "individual-objects",
     recovery: { object: recovery },
     credentialCopies: b2.keyIds.map((keyId) => ({
       keyId,
@@ -730,7 +747,7 @@ export async function snapshot(
   for (
     const name of [
       ...material,
-      ...out.map((r) => r.destination.object),
+      ...(!recoveryPacks ? out.map((r) => r.destination.object) : []),
       ...packs.map((pack) => pack.object),
       manifestName,
       ...(databaseCopy

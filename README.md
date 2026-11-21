@@ -2,8 +2,8 @@
 
 Portable Node 22 package for staging-only Supabase Storage, Cloudflare R2/KV and
 private Backblaze B2. No Windows, DPAPI, browser session, provider master key,
-or recovery private key is required. This package contains no live resource
-identifiers. Configuration is supplied at execution time.
+or recovery private key is required. Live access configuration and credentials
+are supplied at execution time.
 
 `npm ci --ignore-scripts` and `npm test` run synthetic tests without
 credentials. `node run.mjs inventory` verifies configuration, source reads,
@@ -20,6 +20,16 @@ and integrity information exist only inside the encrypted manifest. Source bytes
 are checked against the original records before packing, and the source
 inventories are compared again before committing success. A maximum of 1,500
 packs bounds the number of requests for a complete restore.
+
+Packed snapshots renew compliance on the complete recovery packs and their
+manifest/escrow/database files. Legacy individual objects remain present and
+their existing locks are never reduced or removed, but are not extended for
+these newer snapshots. `retentionBasis=complete-recovery-packs` makes this
+explicit: the 30-day recovery guarantee requires a pack-aware restorer. Every
+record must be covered exactly once and every pack must have verified retention
+before success. This avoids thousands of daily legacy retention API calls beyond
+the provider's zero-cost cap. Do not disable packed mode without rechecking the
+individual-object retention quota.
 
 Scheduled mode keeps its existing behavior unless the separately reviewed
 `BACKUP_RECOVERY_PACKS_ENABLED=true` variable is installed. Trial packed mode
@@ -38,6 +48,15 @@ data are excluded. Managed tables require a privileged full-read role; its wider
 technical read scope must be explicitly accepted. No administrative URI is
 accepted. An absent database gate preserves the existing file-only behavior and
 schedule.
+
+`node run.mjs database-probe` tests a native client alone and alongside the
+snapshot connection, without writing a snapshot or attempt marker. Budget for
+pooler backend headroom as well as the two active clients. Snapshot heartbeats
+preserve the exporting transaction while pg_dump runs. Native startup/connect
+are bounded at 30/60 seconds and the complete dump at 15 minutes; client failure
+never commits backup success. The client image is pinned by digest; TLS remains
+verify-full, GSSAPI is disabled for Supavisor, and DNS resolution preserves TLS
+hostname verification. A timed-out CLI is killed and its unique container removed.
 
 Do not enable a scheduler until provider billing restrictions, source scopes,
 credential registry records, encrypted credential recovery and the independent
