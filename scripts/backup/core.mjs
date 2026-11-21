@@ -2,6 +2,33 @@ import { createHash, randomUUID, X509Certificate } from "node:crypto";
 import { Buffer } from "node:buffer";
 export const CAP = 9_000_000_000;
 export const DAY = 86400000;
+// The event contains a cron expression, not an authoritative scheduled date.
+export function scheduleObservation(event, cron, now = new Date()) {
+  const started = new Date(now);
+  requireSafe(Number.isFinite(started.getTime()), "invalid_schedule_clock");
+  if (event !== "schedule") {
+    return { event: "manual", startedAt: started.toISOString() };
+  }
+  const hours =
+    { "23 3 * * *": [3], "23 15 * * *": [15], "23 3,15 * * *": [3, 15] }[cron];
+  requireSafe(!!hours, "unexpected_backup_schedule");
+  const candidates = hours.map((hour) => {
+    const at = new Date(started);
+    at.setUTCHours(hour, 23, 0, 0);
+    if (at > started) at.setUTCDate(at.getUTCDate() - 1);
+    return at.getTime();
+  });
+  const inferred = Math.max(...candidates);
+  return {
+    event: "schedule",
+    cron,
+    startedAt: started.toISOString(),
+    inferredScheduledAt: new Date(inferred).toISOString(),
+    inferredDelaySeconds: Math.floor((started.getTime() - inferred) / 1000),
+    scheduledDateIsInferred: true,
+    targetIntervalHours: 12,
+  };
+}
 export function requireSafe(ok, code) {
   if (!ok) {
     const e = new Error(code);

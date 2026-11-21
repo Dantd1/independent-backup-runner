@@ -145,3 +145,13 @@ from recurring database capture (`DATABASE_BACKUP_SCHEDULE_ENABLED`). Enable the
 schedule gate only after the actual encrypted dump, isolated restore and
 independent database-age monitoring have passed. The file backup cron remains
 unchanged while the database extension is gated.
+
+The two UTC windows are separate cron expressions (`23 3 * * *` and
+`23 15 * * *`); frequency remains twice daily. The runner logs only the matched
+expression, UTC start, inferred latest matching date and inferred delay. GitHub
+does not supply the authoritative scheduled date; these fields cannot establish
+the exact origin of a delayed event. Legacy combined expressions remain accepted
+for events already queued. Manual dispatch never proves scheduled cadence.
+GitHub scheduling is best effort, so two cron entries do not guarantee starts
+exactly twelve hours apart. Compare actual database capture timestamps and retain
+independent age monitoring before claiming RPO or regular cadence.

@@ -21,11 +21,54 @@ import {
   parseR2List,
   recordAttempt,
   requireSpace,
+  scheduleObservation,
   snapshot,
   sourcePath,
   validateDatabaseCa,
   validateDatabaseUrl,
 } from "../core.mjs";
+test("schedule telemetry distinguishes UTC windows, rollover and legacy events", () => {
+  const morning = scheduleObservation(
+    "schedule",
+    "23 3 * * *",
+    "2026-11-21T03:25:00Z",
+  );
+  assert.equal(morning.inferredScheduledAt, "2026-11-21T03:23:00.000Z");
+  assert.equal(morning.inferredDelaySeconds, 120);
+  assert.equal(morning.scheduledDateIsInferred, true);
+  const afternoon = scheduleObservation(
+    "schedule",
+    "23 15 * * *",
+    "2026-11-21T15:23:00Z",
+  );
+  assert.equal(
+    Date.parse(afternoon.inferredScheduledAt) -
+      Date.parse(morning.inferredScheduledAt),
+    12 * 3600000,
+  );
+  assert.equal(
+    scheduleObservation("schedule", "23 15 * * *", "2026-11-22T02:00:00Z")
+      .inferredScheduledAt,
+    afternoon.inferredScheduledAt,
+  );
+  assert.equal(
+    scheduleObservation("schedule", "23 3,15 * * *", "2026-11-21T11:25:25Z")
+      .inferredDelaySeconds,
+    28945,
+  );
+  assert.equal(
+    scheduleObservation("workflow_dispatch", "", "2026-11-21T11:25:25Z").event,
+    "manual",
+  );
+  assert.throws(
+    () => scheduleObservation("schedule", "* * * * *"),
+    /unexpected_backup_schedule/,
+  );
+  assert.throws(
+    () => scheduleObservation("schedule", "23 3 * * *", "invalid"),
+    /invalid_schedule_clock/,
+  );
+});
 const scope = {
   environment: "staging",
   projectRef: "a".repeat(20),

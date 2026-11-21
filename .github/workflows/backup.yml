@@ -7,7 +7,9 @@ name: Independent staging backup
 run-name: Staging backup — ${{ inputs.mode || 'backup' }}
 on:
   schedule:
-    - cron: "23 3,15 * * *"
+    # Separate expressions make github.event.schedule identify each UTC window.
+    - cron: "23 3 * * *"
+    - cron: "23 15 * * *"
   workflow_dispatch:
     inputs:
       mode:
@@ -45,6 +47,7 @@ jobs:
         working-directory: scripts/backup
         env:
           XFINDER_ENVIRONMENT: staging
+          BACKUP_TRIGGER_CRON: ${{ github.event.schedule }}
           BACKUP_ZERO_COST_VERIFIED: ${{ vars.BACKUP_ZERO_COST_VERIFIED }}
           DATABASE_BACKUP_ENABLED: ${{ vars.DATABASE_BACKUP_ENABLED == 'true' && (github.event_name != 'schedule' || vars.DATABASE_BACKUP_SCHEDULE_ENABLED == 'true') && 'true' || 'false' }}
           DATABASE_READER_URL: ${{ secrets.DATABASE_READER_URL }}

@@ -4,11 +4,19 @@ import {
   configFromEnv,
   recordAttempt,
   requireSafe,
+  scheduleObservation,
   snapshot,
 } from "./core.mjs";
 import { connectProviders } from "./providers.mjs";
 let providers;
 try {
+  console.log(JSON.stringify({
+    telemetry: "backup_schedule",
+    ...scheduleObservation(
+      process.env.GITHUB_EVENT_NAME,
+      process.env.BACKUP_TRIGGER_CRON,
+    ),
+  }));
   const config = configFromEnv(process.env);
   providers = await connectProviders(config);
   const cipher = new age.Encrypter();
