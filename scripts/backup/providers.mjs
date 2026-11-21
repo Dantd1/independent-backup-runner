@@ -33,10 +33,12 @@ export async function retrySourceRead(
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const response = await read();
-      if ([429, 500, 502, 503, 504].includes(response.status)) {
+      if ([404, 429, 500, 502, 503, 504].includes(response.status)) {
         await response.body?.cancel();
         const error = Error("source temporarily unavailable");
-        error.safeCode = "source_read_unavailable";
+        error.safeCode = response.status === 404
+          ? "provider_http_404"
+          : "source_read_unavailable";
         throw error;
       }
       const bytes = await boundedBytes(response);
@@ -49,9 +51,14 @@ export async function retrySourceRead(
         error.name,
       );
       const transient = transport ||
-        error.safeCode === "source_read_unavailable";
+        ["source_read_unavailable", "provider_http_404"].includes(
+          error.safeCode,
+        );
       if (!transient) throw error;
       if (attempt === 2) {
+        if (error.safeCode === "provider_http_404") {
+          requireSafe(false, "provider_http_404");
+        }
         requireSafe(
           false,
           transport

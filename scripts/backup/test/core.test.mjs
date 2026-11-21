@@ -81,6 +81,28 @@ test("read-only exporters retry transport/body failures, bound retries and refus
   );
   assert.equal(calls, 3);
 });
+test("temporary 404 reads may recover but persistent missing sources remain failures", async () => {
+  let calls = 0;
+  const result = await retrySourceRead(
+    async () =>
+      ++calls === 1
+        ? new Response("missing", { status: 404 })
+        : new Response("synthetic"),
+    { pause: async () => {} },
+  );
+  assert.equal(await result.text(), "synthetic");
+  assert.equal(calls, 2);
+  calls = 0;
+  await assert.rejects(
+    retrySourceRead(async () => {
+      calls++;
+      return new Response("missing", { status: 404 });
+    }, { pause: async () => {} }),
+    /provider_http_404/,
+  );
+  assert.equal(calls, 3);
+});
+
 test("attempt telemetry is bounded, operational only and blocked when free capacity is exhausted", async () => {
   const calls = [];
   const b2 = {
