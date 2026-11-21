@@ -112,3 +112,9 @@ Storage catalog and R2 listings are compared before/after. KV capture is not
 atomic and this does not constitute a consistent database/file transaction.
 Individual objects are limited to 64 MiB. Sample ciphertext verification does
 not prove full decryption, bootstrap, or the complete service recovery time.
+
+The workflow separates manual database rehearsals (`DATABASE_BACKUP_ENABLED`)
+from recurring database capture (`DATABASE_BACKUP_SCHEDULE_ENABLED`). Enable the
+schedule gate only after the actual encrypted dump, isolated restore and
+independent database-age monitoring have passed. The file backup cron remains
+unchanged while the database extension is gated.
