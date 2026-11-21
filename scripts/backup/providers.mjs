@@ -280,6 +280,7 @@ async function dockerDump(url, snapshot, ca, signal, { probe = false } = {}) {
       let size = 0, failed = false, diagnostic = "";
       let clientStarted = false, clientConnected = false;
       let lastOperation = "startup";
+      const seenOperations = new Set();
       let deadlineCode;
       const startupDeadline = setTimeout(() => {
         if (!clientStarted) {
@@ -296,7 +297,7 @@ async function dockerDump(url, snapshot, ca, signal, { probe = false } = {}) {
       const timer = setTimeout(() => {
         failed = true;
         child.kill("SIGKILL");
-      }, 300000);
+      }, 900000);
       signal?.addEventListener("abort", stop, { once: true });
       if (signal?.aborted) stop();
       child.stderr.on("data", (chunk) => {
@@ -316,7 +317,15 @@ async function dockerDump(url, snapshot, ca, signal, { probe = false } = {}) {
           "dumping contents of table": "table_data",
         };
         for (const [pattern, operation] of Object.entries(operations)) {
-          if (part.includes(pattern)) lastOperation = operation;
+          if (part.includes(pattern)) {
+            lastOperation = operation;
+            if (!seenOperations.has(operation)) {
+              seenOperations.add(operation);
+              console.log(
+                JSON.stringify({ phase: "database_metadata_" + operation }),
+              );
+            }
+          }
         }
         if (!clientStarted && part.includes("xfinder-client-ready")) {
           clientStarted = true;
