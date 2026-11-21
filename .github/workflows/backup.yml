@@ -39,7 +39,7 @@ jobs:
         run: npm test
       - name: Prepare pinned database client
         if: vars.DATABASE_BACKUP_ENABLED == 'true' && (github.event_name != 'schedule' || vars.DATABASE_BACKUP_SCHEDULE_ENABLED == 'true') && (github.event_name == 'schedule' || inputs.mode != 'selftest')
-        run: docker pull public.ecr.aws/supabase/postgres:17.6.1.166
+        run: docker pull postgres@sha256:a77aa70e641402a21411b92b721c58d10f23b50ae5fdd2333efd22d166e1e5f7
       - name: Run bounded staging backup
         if: github.event_name == 'schedule' || inputs.mode != 'selftest'
         working-directory: scripts/backup

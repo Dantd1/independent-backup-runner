@@ -1,6 +1,11 @@
 import * as age from "age-encryption";
 import process from "node:process";
-import { configFromEnv, recordAttempt, snapshot } from "./core.mjs";
+import {
+  configFromEnv,
+  recordAttempt,
+  requireSafe,
+  snapshot,
+} from "./core.mjs";
 import { connectProviders } from "./providers.mjs";
 let providers;
 try {
@@ -8,6 +13,9 @@ try {
   providers = await connectProviders(config);
   const cipher = new age.Encrypter();
   cipher.addRecipient(config.AGE_RECIPIENT);
+  if (process.argv[2] === "database-probe") {
+    requireSafe(!!providers.database, "database_configuration_required");
+  }
   const result = process.argv[2] === "database-probe"
     ? await providers.database.probe()
     : await snapshot({

@@ -14,6 +14,8 @@ import {
   validateDatabaseUrl,
 } from "./core.mjs";
 export const DATABASE_IMAGE = "public.ecr.aws/supabase/postgres:17.6.1.166";
+export const DATABASE_CLIENT_IMAGE =
+  "postgres@sha256:a77aa70e641402a21411b92b721c58d10f23b50ae5fdd2333efd22d166e1e5f7";
 const quoteIdentifier = (value) => '"' + value.replaceAll('"', '""') + '"';
 
 export async function inspectDatabase(sql, projectRef, role) {
@@ -236,7 +238,7 @@ async function dockerDump(url, snapshot, ca, signal, { probe = false } = {}) {
     ].flatMap((key) => ["--env", key]),
     "--entrypoint",
     "sh",
-    DATABASE_IMAGE,
+    DATABASE_CLIENT_IMAGE,
     "-c",
     'umask 077; printf "%s" "$DATABASE_SSL_CA" > "$PGSSLROOTCERT" && printf "xfinder-client-ready\\n" >&2 && exec "$@"',
     "postgres-client",
@@ -277,6 +279,7 @@ async function dockerDump(url, snapshot, ca, signal, { probe = false } = {}) {
       const chunks = [];
       let size = 0, failed = false, diagnostic = "";
       let clientStarted = false, clientConnected = false;
+      let lastOperation = "startup";
       let deadlineCode;
       const startupDeadline = setTimeout(() => {
         if (!clientStarted) {
@@ -298,6 +301,23 @@ async function dockerDump(url, snapshot, ca, signal, { probe = false } = {}) {
       if (signal?.aborted) stop();
       child.stderr.on("data", (chunk) => {
         const part = chunk.toString();
+        const operations = {
+          "reading extensions": "extensions",
+          "reading schemas": "schemas",
+          "reading user-defined tables": "tables",
+          "reading user-defined functions": "functions",
+          "reading column info": "columns",
+          "reading indexes": "indexes",
+          "reading constraints": "constraints",
+          "reading policies": "policies",
+          "reading dependency data": "dependencies",
+          "reading subscriptions": "subscriptions",
+          "saving database definition": "database_definition",
+          "dumping contents of table": "table_data",
+        };
+        for (const [pattern, operation] of Object.entries(operations)) {
+          if (part.includes(pattern)) lastOperation = operation;
+        }
         if (!clientStarted && part.includes("xfinder-client-ready")) {
           clientStarted = true;
           console.log(JSON.stringify({ phase: "database_client_started" }));
@@ -345,6 +365,16 @@ async function dockerDump(url, snapshot, ca, signal, { probe = false } = {}) {
               ? "database_dump_connect_failed"
               : "database_dump_failed");
           diagnostic = "";
+          console.error(
+            JSON.stringify({
+              phase: "database_client_failed",
+              code: error.safeCode,
+              clientStarted,
+              clientConnected,
+              lastOperation,
+              capturedBytes: size,
+            }),
+          );
           reject(error);
         } else {
           const bytes = Buffer.concat(chunks);
