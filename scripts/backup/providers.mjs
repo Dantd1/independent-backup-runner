@@ -18,7 +18,54 @@ export const DATABASE_CLIENT_IMAGE =
   "postgres@sha256:a77aa70e641402a21411b92b721c58d10f23b50ae5fdd2333efd22d166e1e5f7";
 const quoteIdentifier = (value) => '"' + value.replaceAll('"', '""') + '"';
 
-export async function inspectDatabase(sql, projectRef, role) {
+export const DATABASE_WRITE_SCOPE_SQL = `with rights as (
+ select n.nspname,c.relname,c.relkind,
+ case when c.relkind='S' then has_sequence_privilege(current_user,c.oid,'USAGE,UPDATE')
+ else has_table_privilege(current_user,c.oid,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER,MAINTAIN') end as writable
+ from pg_class c join pg_namespace n on n.oid=c.relnamespace
+ where c.relkind in ('r','p','v','m','f','S') and n.nspname !~ '^pg_' and n.nspname<>'information_schema'
+), classified as (
+ select *,((nspname='net' and relname in ('http_request_queue','_http_response','http_request_queue_id_seq'))
+ or (nspname='cron' and relname='job_run_details')) as managed from rights
+)
+select jsonb_build_object(
+ 'unsafe_tables',count(*) filter(where writable and relkind<>'S' and not managed),
+ 'unsafe_sequences',count(*) filter(where writable and relkind='S' and not managed),
+ 'managed_tables',count(*) filter(where writable and relkind<>'S' and managed),
+ 'managed_sequences',count(*) filter(where writable and relkind='S' and managed),
+ 'managed_functions',(select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+   where n.nspname in ('net','cron') and has_schema_privilege(current_user,n.oid,'USAGE')
+   and has_function_privilege(current_user,p.oid,'EXECUTE'))
+) as scope from classified`;
+export function assertDatabaseWriteScope(
+  scope,
+  { allowManagedPublicWrites = false } = {},
+) {
+  const fields = [
+    "unsafe_tables",
+    "unsafe_sequences",
+    "managed_tables",
+    "managed_sequences",
+    "managed_functions",
+  ];
+  requireSafe(
+    scope &&
+      fields.every((key) =>
+        Number.isSafeInteger(scope[key]) && scope[key] >= 0
+      ),
+    "database_scope_inspection_required",
+  );
+  requireSafe(
+    scope.unsafe_tables === 0 && scope.unsafe_sequences === 0,
+    "database_application_write_privileges_denied",
+  );
+  requireSafe(
+    allowManagedPublicWrites ||
+      fields.slice(2).every((key) => scope[key] === 0),
+    "database_managed_public_writes_unapproved",
+  );
+}
+export async function inspectDatabase(sql, projectRef, role, options = {}) {
   requireSafe(
     /^[a-z0-9]{20}$/.test(projectRef) && projectRef !== "ozryyalyaquujtfaudzi",
     "database_stage_required",
@@ -54,7 +101,9 @@ export async function inspectDatabase(sql, projectRef, role) {
       source.read_only === "on" && source.unsafe_definers === 0,
     "database_privileges_denied",
   );
-  return source;
+  const [rights] = await sql.unsafe(DATABASE_WRITE_SCOPE_SQL);
+  assertDatabaseWriteScope(rights.scope, options);
+  return { ...source, writeScope: rights.scope };
 }
 
 // The exported transaction remains open until pg_dump has consumed its snapshot.
@@ -63,7 +112,7 @@ export function captureDatabase(
   projectRef,
   role,
   dump,
-  { heartbeatMs = 30000 } = {},
+  { heartbeatMs = 30000, allowManagedPublicWrites = false } = {},
 ) {
   requireSafe(
     /^[a-z0-9]{20}$/.test(projectRef) && projectRef !== "ozryyalyaquujtfaudzi",
@@ -76,7 +125,7 @@ export function captureDatabase(
     await tx.unsafe(
       "set local row_security=off;set local search_path=pg_catalog;set local extra_float_digits=3",
     );
-    await inspectDatabase(tx, projectRef, role);
+    await inspectDatabase(tx, projectRef, role, { allowManagedPublicWrites });
     const [snapshot] = await tx.unsafe(
       "select pg_export_snapshot() as snapshot,clock_timestamp()::text as captured_at",
     );
@@ -423,14 +472,14 @@ export function connectDatabase(c) {
     },
   });
   return {
-    inspect: () => inspectDatabase(sql, c.scope.projectRef, role),
+    inspect: () => inspectDatabase(sql, c.scope.projectRef, role, c),
     probe: async () => {
       console.log(JSON.stringify({ phase: "database_native_single_client" }));
       const single = await dockerDump(url, "", c.databaseCa, undefined, {
         probe: true,
       });
       requireSafe(single.toString().trim() === "1", "database_probe_invalid");
-      await inspectDatabase(sql, c.scope.projectRef, role);
+      await inspectDatabase(sql, c.scope.projectRef, role, c);
       console.log(JSON.stringify({ phase: "database_native_parallel_client" }));
       const parallel = await dockerDump(url, "", c.databaseCa, undefined, {
         probe: true,
@@ -444,6 +493,7 @@ export function connectDatabase(c) {
         c.scope.projectRef,
         role,
         (snapshot, signal) => dockerDump(url, snapshot, c.databaseCa, signal),
+        { allowManagedPublicWrites: c.allowManagedPublicWrites },
       ),
     close: () => sql.end({ timeout: 2 }),
   };

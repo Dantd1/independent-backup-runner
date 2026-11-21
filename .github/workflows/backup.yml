@@ -49,6 +49,7 @@ jobs:
           DATABASE_BACKUP_ENABLED: ${{ vars.DATABASE_BACKUP_ENABLED == 'true' && (github.event_name != 'schedule' || vars.DATABASE_BACKUP_SCHEDULE_ENABLED == 'true') && 'true' || 'false' }}
           DATABASE_READER_URL: ${{ secrets.DATABASE_READER_URL }}
           DATABASE_SSL_CA: ${{ secrets.DATABASE_SSL_CA }}
+          DATABASE_MANAGED_PUBLIC_WRITES_ACCEPTED: ${{ vars.DATABASE_MANAGED_PUBLIC_WRITES_ACCEPTED }}
           BACKUP_RECOVERY_PACKS_ENABLED: ${{ vars.BACKUP_RECOVERY_PACKS_ENABLED }}
           BACKUP_SCOPE_JSON: ${{ secrets.BACKUP_SCOPE_JSON }}
           STORAGE_READER_ID: ${{ secrets.STORAGE_READER_ID }}

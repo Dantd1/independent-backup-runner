@@ -147,6 +147,8 @@ export function configFromEnv(env) {
     config.databaseRole =
       validateDatabaseUrl(config.databaseUrl, scope.projectRef).role;
     config.databaseCa = validateDatabaseCa(env.DATABASE_SSL_CA);
+    config.allowManagedPublicWrites =
+      env.DATABASE_MANAGED_PUBLIC_WRITES_ACCEPTED === "true";
   }
   return config;
 }

@@ -5,6 +5,7 @@ import { Buffer } from "node:buffer";
 import assert from "node:assert/strict";
 import * as age from "age-encryption";
 import {
+  assertDatabaseWriteScope,
   captureDatabase,
   inspectDatabase,
   retrySourceRead,
@@ -37,6 +38,48 @@ const scope = {
   sitesExportUrl: "https://synthetic-staging.example.workers.dev/",
   recoveryObject: "staging/recovery/synthetic/identity.age",
 };
+
+test("managed platform capabilities require explicit acceptance and never permit application writes", () => {
+  const empty = {
+    unsafe_tables: 0,
+    unsafe_sequences: 0,
+    managed_tables: 0,
+    managed_sequences: 0,
+    managed_functions: 0,
+  };
+  assert.doesNotThrow(() => assertDatabaseWriteScope(empty));
+  const managed = {
+    ...empty,
+    managed_tables: 3,
+    managed_sequences: 1,
+    managed_functions: 17,
+  };
+  assert.throws(
+    () => assertDatabaseWriteScope(managed),
+    /database_managed_public_writes_unapproved/,
+  );
+  assert.doesNotThrow(() =>
+    assertDatabaseWriteScope(managed, { allowManagedPublicWrites: true })
+  );
+  assert.throws(
+    () =>
+      assertDatabaseWriteScope({ ...managed, unsafe_tables: 1 }, {
+        allowManagedPublicWrites: true,
+      }),
+    /database_application_write_privileges_denied/,
+  );
+  assert.throws(
+    () =>
+      assertDatabaseWriteScope({ ...managed, unsafe_sequences: 1 }, {
+        allowManagedPublicWrites: true,
+      }),
+    /database_application_write_privileges_denied/,
+  );
+  assert.throws(
+    () => assertDatabaseWriteScope({}),
+    /database_scope_inspection_required/,
+  );
+});
 const environment = () => ({
   XFINDER_ENVIRONMENT: "staging",
   BACKUP_ZERO_COST_VERIFIED: "true",
