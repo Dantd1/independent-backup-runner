@@ -55,11 +55,18 @@ export async function inspectDatabase(sql, projectRef, role) {
 }
 
 // The exported transaction remains open until pg_dump has consumed its snapshot.
-export function captureDatabase(sql, projectRef, role, dump) {
+export function captureDatabase(
+  sql,
+  projectRef,
+  role,
+  dump,
+  { heartbeatMs = 30000 } = {},
+) {
   requireSafe(
     /^[a-z0-9]{20}$/.test(projectRef) && projectRef !== "ozryyalyaquujtfaudzi",
     "database_stage_required",
   );
+  const abort = new AbortController();
   return sql.begin("isolation level repeatable read read only", async (tx) => {
     const progress = (phase) => console.log(JSON.stringify({ phase }));
     progress("database_inspection");
@@ -105,7 +112,26 @@ export function captureDatabase(sql, projectRef, role, dump) {
       `select n.nspname,p.proname,pg_get_function_identity_arguments(p.oid) as arguments,pg_get_userbyid(p.proowner) as owner from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname in ('public','private','auth','storage','supabase_migrations') and exists(select 1 from pg_depend d where d.classid='pg_proc'::regclass and d.objid=p.oid and d.deptype='e')`,
     );
     progress("database_dump");
-    const bytes = await dump(snapshot.snapshot);
+    // Keep the exporting transaction alive while a separate pg_dump connects.
+    // Closing that transaction invalidates the snapshot; abort the dump as well.
+    let busy = false, heartbeatFailure;
+    const heartbeat = setInterval(() => {
+      if (busy || abort.signal.aborted) return;
+      busy = true;
+      tx.unsafe("select 1").catch((error) => {
+        heartbeatFailure = error;
+        abort.abort();
+      }).finally(() => {
+        busy = false;
+      });
+    }, heartbeatMs);
+    let bytes;
+    try {
+      bytes = await dump(snapshot.snapshot, abort.signal);
+      if (heartbeatFailure) throw heartbeatFailure;
+    } finally {
+      clearInterval(heartbeat);
+    }
     progress("database_dump_complete");
     return {
       dump: bytes,
@@ -125,6 +151,7 @@ export function captureDatabase(sql, projectRef, role, dump) {
       },
     };
   }).catch((error) => {
+    abort.abort();
     const codes = {
       "57014": "database_statement_timeout",
       "25P03": "database_idle_transaction_timeout",
@@ -135,12 +162,14 @@ export function captureDatabase(sql, projectRef, role, dump) {
       "CONNECT_TIMEOUT": "database_connect_timeout",
       "CONNECTION_ENDED": "database_connection_ended",
     };
-    if (!error.safeCode) error.safeCode = codes[error.code] ?? "database_capture_failed";
+    if (!error.safeCode) {
+      error.safeCode = codes[error.code] ?? "database_capture_failed";
+    }
     throw error;
   });
 }
 
-async function dockerDump(url, snapshot, ca) {
+async function dockerDump(url, snapshot, ca, signal) {
   const name = "xfinder-db-dump-" + randomUUID();
   const env = {
     ...process.env,
@@ -150,6 +179,7 @@ async function dockerDump(url, snapshot, ca) {
     PGPASSWORD: decodeURIComponent(url.password),
     PGDATABASE: "postgres",
     PGSSLMODE: "verify-full",
+    PGCONNECT_TIMEOUT: "20",
     PGSSLROOTCERT: "/tmp/database-root.crt",
     DATABASE_SSL_CA: ca,
     PGOPTIONS:
@@ -174,6 +204,7 @@ async function dockerDump(url, snapshot, ca) {
       "PGPASSWORD",
       "PGDATABASE",
       "PGSSLMODE",
+      "PGCONNECT_TIMEOUT",
       "PGSSLROOTCERT",
       "PGOPTIONS",
       "DATABASE_SSL_CA",
@@ -199,13 +230,23 @@ async function dockerDump(url, snapshot, ca) {
         windowsHide: true,
         stdio: ["ignore", "pipe", "pipe"],
       });
+      const stop = () => {
+        failed = true;
+        child.kill();
+      };
       const chunks = [];
-      let size = 0, failed = false;
+      let size = 0, failed = false, diagnostic = "";
       const timer = setTimeout(() => {
         failed = true;
         child.kill();
       }, 300000);
-      child.stderr.on("data", () => {});
+      signal?.addEventListener("abort", stop, { once: true });
+      if (signal?.aborted) stop();
+      child.stderr.on("data", (chunk) => {
+        if (diagnostic.length < 8192) {
+          diagnostic += chunk.toString().slice(0, 8192 - diagnostic.length);
+        }
+      });
       child.stdout.on("data", (chunk) => {
         size += chunk.length;
         if (size > 63 * 1024 * 1024) {
@@ -217,11 +258,26 @@ async function dockerDump(url, snapshot, ca) {
         failed = true;
       });
       child.on("close", (code) => {
+        signal?.removeEventListener("abort", stop);
         clearTimeout(timer);
         if (failed || code !== 0) {
           chunks.forEach((chunk) => chunk.fill(0));
           const error = Error("database_dump_failed");
-          error.safeCode = "database_dump_failed";
+          error.safeCode = /password authentication failed/i.test(diagnostic)
+            ? "database_dump_authentication_failed"
+            : /certificate|SSL error/i.test(diagnostic)
+            ? "database_dump_tls_failed"
+            : /too many connections|connection limit/i.test(diagnostic)
+            ? "database_dump_connection_limit"
+            : /permission denied/i.test(diagnostic)
+            ? "database_dump_permission_denied"
+            : /invalid snapshot|snapshot.*does not exist/i.test(diagnostic)
+            ? "database_dump_snapshot_failed"
+            : /timeout|timed out|connection refused|could not connect|network is unreachable/i
+                .test(diagnostic)
+            ? "database_dump_connect_failed"
+            : "database_dump_failed";
+          diagnostic = "";
           reject(error);
         } else {
           const bytes = Buffer.concat(chunks);
@@ -264,7 +320,7 @@ export function connectDatabase(c) {
         sql,
         c.scope.projectRef,
         role,
-        (snapshot) => dockerDump(url, snapshot, c.databaseCa),
+        (snapshot, signal) => dockerDump(url, snapshot, c.databaseCa, signal),
       ),
     close: () => sql.end({ timeout: 2 }),
   };
