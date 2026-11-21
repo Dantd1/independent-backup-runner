@@ -12,14 +12,14 @@ creates an age encrypted manifest only after copying and source-stability
 checks. Public logs contain status/error codes only, not inventory, paths,
 configuration or secrets.
 
-`node run.mjs backup-packed` additionally creates encrypted recovery packs.
-The v1 per-object records remain present for older recovery tools. Packs use
-stable hash partitions, normally at most 32 MiB of plaintext per pack, and are
-reused and protected by the same retention/capacity guards. Their membership,
-offsets and integrity information exist only inside the encrypted manifest.
-Source bytes are checked against the original records before packing, and the
-source inventories are compared again before committing success. A maximum of
-1,500 packs bounds the number of requests for a complete restore.
+`node run.mjs backup-packed` additionally creates encrypted recovery packs. The
+v1 per-object records remain present for older recovery tools. Packs use stable
+hash partitions, normally at most 32 MiB of plaintext per pack, and are reused
+and protected by the same retention/capacity guards. Their membership, offsets
+and integrity information exist only inside the encrypted manifest. Source bytes
+are checked against the original records before packing, and the source
+inventories are compared again before committing success. A maximum of 1,500
+packs bounds the number of requests for a complete restore.
 
 Scheduled mode keeps its existing behavior unless the separately reviewed
 `BACKUP_RECOVERY_PACKS_ENABLED=true` variable is installed. Trial packed mode
@@ -51,11 +51,11 @@ All values below belong in a protected execution environment, not in this repo:
 - `STORAGE_READER_ID` / `STORAGE_READER_KEY`: expiring HMAC reader for the
   dedicated staging Storage export endpoint. No direct database or project key.
 - `SITES_READER_ID` / `SITES_READER_KEY`: separate expiring HMAC reader for a
-  dedicated read-only exporter bound only to staging R2 and KV.
-  Both exporters verify signatures over the exact request body and timestamp,
-  allow a 60-second clock window, reject browser origins, and expose no mutation
-  operation. Repeated signed reads inside that window are idempotent.
-  Administrative source credentials remain inside their providers.
+  dedicated read-only exporter bound only to staging R2 and KV. Both exporters
+  verify signatures over the exact request body and timestamp, allow a 60-second
+  clock window, reject browser origins, and expose no mutation operation.
+  Repeated signed reads inside that window are idempotent. Administrative source
+  credentials remain inside their providers.
 - `B2_READ_KEY_ID` / `B2_READ_KEY`: exact bucket/prefix `staging/`, capabilities
   `readFiles,listFiles,readFileRetentions,listBuckets,listAllBucketNames`.
 - `B2_WRITE_KEY_ID` / `B2_WRITE_KEY`: exact bucket/prefix `staging/`,

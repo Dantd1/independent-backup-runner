@@ -330,6 +330,47 @@ test("packing refuses changed source bytes and never commits partial packs as su
   );
 });
 
+test("reused packs remap member indexes after a preceding source is added", async () => {
+  const f = await fixture(), decrypt = new age.Decrypter();
+  decrypt.addIdentity(f.identity);
+  const first = await snapshot({ ...f, recoveryPacks: true });
+  const before = JSON.parse(
+    await decrypt.decrypt(f.payloads.get(first.manifest), "text"),
+  );
+  const previousIndex = before.records.findIndex((record) =>
+    record.kind === "r2"
+  );
+  const previousPack = before.recoveryPacks.find((pack) =>
+    pack.parts.some((part) => part.index === previousIndex)
+  );
+  const list = f.storage.list;
+  f.storage.list = async () => {
+    const catalog = await list();
+    catalog.objects.unshift({
+      ...catalog.objects[0],
+      id: "added",
+      name: "added.png",
+    });
+    return catalog;
+  };
+  const second = await snapshot({
+    ...f,
+    recoveryPacks: true,
+    now: f.now + DAY,
+  });
+  const after = JSON.parse(
+    await decrypt.decrypt(f.payloads.get(second.manifest), "text"),
+  );
+  const index = after.records.findIndex((record) => record.kind === "r2");
+  assert.equal(index, previousIndex + 1);
+  const reused = after.recoveryPacks.find((pack) =>
+    pack.object === previousPack.object
+  );
+  assert.equal(reused.parts[0].index, index);
+  const bytes = await decrypt.decrypt(f.payloads.get(reused.object));
+  assert.equal(digest(bytes), after.records[index].destination.sourceDigest);
+});
+
 test("additional archived credentials retain compliance without changing legacy credentialCopies", async () => {
   const f = await fixture(), object = "staging/credentials/synthetic-extra.age";
   f.files.set(object, {
