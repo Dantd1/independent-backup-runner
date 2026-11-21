@@ -8,22 +8,24 @@ try {
   providers = await connectProviders(config);
   const cipher = new age.Encrypter();
   cipher.addRecipient(config.AGE_RECIPIENT);
-  const result = await snapshot({
-    ...providers,
-    scope: config.scope,
-    encrypter: cipher,
-    log: ({ phase, completed, total }) => {
-      if (
-        ["copy", "recovery_pack"].includes(phase) &&
-        Number.isSafeInteger(completed) && Number.isSafeInteger(total)
-      ) {
-        console.log(JSON.stringify({ phase, completed, total }));
-      }
-    },
-    mode: process.argv[2] === "backup-packed" ? "backup" : process.argv[2],
-    recoveryPacks: process.argv[2] === "backup-packed" ||
-      process.env.BACKUP_RECOVERY_PACKS_ENABLED === "true",
-  });
+  const result = process.argv[2] === "database-probe"
+    ? await providers.database.probe()
+    : await snapshot({
+      ...providers,
+      scope: config.scope,
+      encrypter: cipher,
+      log: ({ phase, completed, total }) => {
+        if (
+          ["copy", "recovery_pack"].includes(phase) &&
+          Number.isSafeInteger(completed) && Number.isSafeInteger(total)
+        ) {
+          console.log(JSON.stringify({ phase, completed, total }));
+        }
+      },
+      mode: process.argv[2] === "backup-packed" ? "backup" : process.argv[2],
+      recoveryPacks: process.argv[2] === "backup-packed" ||
+        process.env.BACKUP_RECOVERY_PACKS_ENABLED === "true",
+    });
   if (["backup", "backup-packed"].includes(process.argv[2])) {
     await recordAttempt(providers.b2, "success").catch(() => {
       console.warn(

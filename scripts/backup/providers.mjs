@@ -170,7 +170,7 @@ export function captureDatabase(
   });
 }
 
-async function dockerDump(url, snapshot, ca, signal) {
+async function dockerDump(url, snapshot, ca, signal, { probe = false } = {}) {
   const name = "xfinder-db-dump-" + randomUUID();
   let hostAddress;
   if (url.hostname.endsWith(".pooler.supabase.com")) {
@@ -200,6 +200,8 @@ async function dockerDump(url, snapshot, ca, signal) {
     PGPASSWORD: decodeURIComponent(url.password),
     PGDATABASE: "postgres",
     PGSSLMODE: "verify-full",
+    // Supavisor documents GSSAPI negotiation as unsupported; TLS remains mandatory.
+    PGGSSENCMODE: "disable",
     PGCONNECT_TIMEOUT: "20",
     PGSSLROOTCERT: "/tmp/database-root.crt",
     DATABASE_SSL_CA: ca,
@@ -226,6 +228,7 @@ async function dockerDump(url, snapshot, ca, signal) {
       "PGPASSWORD",
       "PGDATABASE",
       "PGSSLMODE",
+      "PGGSSENCMODE",
       "PGCONNECT_TIMEOUT",
       "PGSSLROOTCERT",
       "PGOPTIONS",
@@ -235,16 +238,28 @@ async function dockerDump(url, snapshot, ca, signal) {
     "sh",
     DATABASE_IMAGE,
     "-c",
-    'umask 077; printf "%s" "$DATABASE_SSL_CA" > "$PGSSLROOTCERT" && printf "xfinder-client-ready\\n" >&2 && exec pg_dump "$@"',
-    "pg_dump",
-    "--format=custom",
-    "--compress=6",
-    "--no-password",
-    "--verbose",
-    "--snapshot=" + snapshot,
-    ...["vault.*", "net.*", "cron.*", "pgsodium.*"].map((value) =>
-      "--exclude-table-data=" + value
-    ),
+    'umask 077; printf "%s" "$DATABASE_SSL_CA" > "$PGSSLROOTCERT" && printf "xfinder-client-ready\\n" >&2 && exec "$@"',
+    "postgres-client",
+    ...(probe
+      ? [
+        "psql",
+        "--no-password",
+        "--no-psqlrc",
+        "--tuples-only",
+        "--no-align",
+        "--command=select 1",
+      ]
+      : [
+        "pg_dump",
+        "--format=custom",
+        "--compress=6",
+        "--no-password",
+        "--verbose",
+        "--snapshot=" + snapshot,
+        ...["vault.*", "net.*", "cron.*", "pgsodium.*"].map((value) =>
+          "--exclude-table-data=" + value
+        ),
+      ]),
   ];
   try {
     return await new Promise((resolve, reject) => {
@@ -255,7 +270,9 @@ async function dockerDump(url, snapshot, ca, signal) {
       });
       const stop = () => {
         failed = true;
-        child.kill();
+        // Docker forwards SIGTERM to the client; SIGKILL closes our CLI promptly.
+        // finally removes only this UUID-scoped container, including its client.
+        child.kill("SIGKILL");
       };
       const chunks = [];
       let size = 0, failed = false, diagnostic = "";
@@ -275,7 +292,7 @@ async function dockerDump(url, snapshot, ca, signal) {
       }, 60000);
       const timer = setTimeout(() => {
         failed = true;
-        child.kill();
+        child.kill("SIGKILL");
       }, 300000);
       signal?.addEventListener("abort", stop, { once: true });
       if (signal?.aborted) stop();
@@ -294,10 +311,11 @@ async function dockerDump(url, snapshot, ca, signal) {
         diagnostic = (diagnostic + part).slice(-8192);
       });
       child.stdout.on("data", (chunk) => {
+        if (probe && chunk.toString().trim() === "1") clientConnected = true;
         size += chunk.length;
         if (size > 63 * 1024 * 1024) {
           failed = true;
-          child.kill();
+          child.kill("SIGKILL");
         } else chunks.push(chunk);
       });
       child.on("error", () => {
@@ -364,6 +382,20 @@ export function connectDatabase(c) {
   });
   return {
     inspect: () => inspectDatabase(sql, c.scope.projectRef, role),
+    probe: async () => {
+      console.log(JSON.stringify({ phase: "database_native_single_client" }));
+      const single = await dockerDump(url, "", c.databaseCa, undefined, {
+        probe: true,
+      });
+      requireSafe(single.toString().trim() === "1", "database_probe_invalid");
+      await inspectDatabase(sql, c.scope.projectRef, role);
+      console.log(JSON.stringify({ phase: "database_native_parallel_client" }));
+      const parallel = await dockerDump(url, "", c.databaseCa, undefined, {
+        probe: true,
+      });
+      requireSafe(parallel.toString().trim() === "1", "database_probe_invalid");
+      return { status: "database_probe_passed" };
+    },
     capture: () =>
       captureDatabase(
         sql,

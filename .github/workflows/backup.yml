@@ -12,7 +12,7 @@ on:
     inputs:
       mode:
         type: choice
-        options: [selftest, inventory, backup, backup-packed]
+        options: [selftest, inventory, database-probe, backup, backup-packed]
         default: selftest
 permissions:
   contents: read
