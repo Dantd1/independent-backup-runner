@@ -61,6 +61,8 @@ export function captureDatabase(sql, projectRef, role, dump) {
     "database_stage_required",
   );
   return sql.begin("isolation level repeatable read read only", async (tx) => {
+    const progress = (phase) => console.log(JSON.stringify({ phase }));
+    progress("database_inspection");
     await tx.unsafe(
       "set local row_security=off;set local search_path=pg_catalog;set local extra_float_digits=3",
     );
@@ -68,6 +70,7 @@ export function captureDatabase(sql, projectRef, role, dump) {
     const [snapshot] = await tx.unsafe(
       "select pg_export_snapshot() as snapshot,clock_timestamp()::text as captured_at",
     );
+    progress("database_catalog");
     requireSafe(
       /^[0-9a-f-]+$/i.test(snapshot.snapshot),
       "database_snapshot_invalid",
@@ -77,6 +80,7 @@ export function captureDatabase(sql, projectRef, role, dump) {
       `select n.nspname as schema,c.relname as name from pg_class c join pg_namespace n on n.oid=c.relnamespace where c.relkind in ('r','p') and n.nspname !~ '^pg_' and n.nspname not in ('information_schema','vault','net','cron','pgsodium') order by 1,2`,
     );
     const counts = [];
+    progress("database_row_counts");
     for (let start = 0; start < tables.length; start += 20) {
       const batch = tables.slice(start, start + 20);
       const rows = await tx.unsafe(
@@ -93,13 +97,16 @@ export function captureDatabase(sql, projectRef, role, dump) {
     const roles = await tx.unsafe(
       "select rolname,rolsuper,rolinherit,rolcreaterole,rolcreatedb,rolreplication,rolbypassrls from pg_roles where rolname !~ '^pg_' and rolname<>'postgres' order by rolname",
     );
+    progress("database_role_metadata");
     const memberships = await tx.unsafe(
       "select parent.rolname as parent,member.rolname as member,m.admin_option,m.inherit_option,m.set_option from pg_auth_members m join pg_roles parent on parent.oid=m.roleid join pg_roles member on member.oid=m.member order by 1,2",
     );
     const extensionFunctions = await tx.unsafe(
       `select n.nspname,p.proname,pg_get_function_identity_arguments(p.oid) as arguments,pg_get_userbyid(p.proowner) as owner from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname in ('public','private','auth','storage','supabase_migrations') and exists(select 1 from pg_depend d where d.classid='pg_proc'::regclass and d.objid=p.oid and d.deptype='e')`,
     );
+    progress("database_dump");
     const bytes = await dump(snapshot.snapshot);
+    progress("database_dump_complete");
     return {
       dump: bytes,
       context: {
@@ -117,6 +124,19 @@ export function captureDatabase(sql, projectRef, role, dump) {
         passwordsExportedAsRoles: false,
       },
     };
+  }).catch((error) => {
+    const codes = {
+      "57014": "database_statement_timeout",
+      "25P03": "database_idle_transaction_timeout",
+      "42501": "database_permission_denied",
+      "0A000": "database_feature_unsupported",
+      "53300": "database_connection_limit",
+      "CONNECTION_CLOSED": "database_connection_closed",
+      "CONNECT_TIMEOUT": "database_connect_timeout",
+      "CONNECTION_ENDED": "database_connection_ended",
+    };
+    if (!error.safeCode) error.safeCode = codes[error.code] ?? "database_capture_failed";
+    throw error;
   });
 }
 
