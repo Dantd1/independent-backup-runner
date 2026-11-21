@@ -49,6 +49,14 @@ technical read scope must be explicitly accepted. No administrative URI is
 accepted. An absent database gate preserves the existing file-only behavior and
 schedule.
 
+Native Supabase logins can inherit managed pg_net/pg_cron capabilities from
+PUBLIC. A default READ ONLY setting prevents accidental writes but is not an
+immutable permission boundary. `DATABASE_MANAGED_PUBLIC_WRITES_ACCEPTED=true`
+requires the owner's explicit staging-only acceptance of this provider scope.
+Absent that acceptance, database capture fails closed. Even with acceptance,
+non-read privileges on other application tables/views/foreign tables/sequences
+are rejected. The executor never uses the inherited native mutation APIs.
+
 `node run.mjs database-probe` tests a native client alone and alongside the
 snapshot connection, without writing a snapshot or attempt marker. Budget for
 pooler backend headroom as well as the two active clients. Snapshot heartbeats
