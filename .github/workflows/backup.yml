@@ -38,7 +38,7 @@ jobs:
       - working-directory: scripts/backup
         run: npm test
       - name: Prepare pinned database client
-        if: vars.DATABASE_BACKUP_ENABLED == 'true' && (github.event_name == 'schedule' || inputs.mode != 'selftest')
+        if: vars.DATABASE_BACKUP_ENABLED == 'true' && (github.event_name != 'schedule' || vars.DATABASE_BACKUP_SCHEDULE_ENABLED == 'true') && (github.event_name == 'schedule' || inputs.mode != 'selftest')
         run: docker pull public.ecr.aws/supabase/postgres:17.6.1.166
       - name: Run bounded staging backup
         if: github.event_name == 'schedule' || inputs.mode != 'selftest'
@@ -46,7 +46,7 @@ jobs:
         env:
           XFINDER_ENVIRONMENT: staging
           BACKUP_ZERO_COST_VERIFIED: ${{ vars.BACKUP_ZERO_COST_VERIFIED }}
-          DATABASE_BACKUP_ENABLED: ${{ vars.DATABASE_BACKUP_ENABLED }}
+          DATABASE_BACKUP_ENABLED: ${{ vars.DATABASE_BACKUP_ENABLED == 'true' && (github.event_name != 'schedule' || vars.DATABASE_BACKUP_SCHEDULE_ENABLED == 'true') && 'true' || 'false' }}
           DATABASE_READER_URL: ${{ secrets.DATABASE_READER_URL }}
           DATABASE_SSL_CA: ${{ secrets.DATABASE_SSL_CA }}
           BACKUP_RECOVERY_PACKS_ENABLED: ${{ vars.BACKUP_RECOVERY_PACKS_ENABLED }}
