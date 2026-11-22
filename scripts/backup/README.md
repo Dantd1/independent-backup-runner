@@ -170,3 +170,8 @@ Manual dispatch does not prove automatic cadence. Retry opportunities reduce
 dependence on one event but cannot guarantee exact twelve-hour starts if GitHub
 stops delivering all events. Keep independent monitoring and compare real capture
 timestamps before claiming operational cadence or RPO/RTO.
+
+The `scheduled-backup` dispatch mode is for an independent clock. It obeys the
+same automatic activation/database gates, whole-job concurrency and real B2 age
+check as the native schedule. A dispatch acknowledgement is not a completed copy.
+It does not require a new application or database credential in this repository.

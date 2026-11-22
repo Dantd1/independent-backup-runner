@@ -14,7 +14,7 @@ on:
     inputs:
       mode:
         type: choice
-        options: [selftest, cadence-check, inventory, database-probe, backup, backup-packed]
+        options: [selftest, cadence-check, scheduled-backup, inventory, database-probe, backup, backup-packed]
         default: selftest
 permissions:
   contents: read
@@ -23,7 +23,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   backup:
-    if: vars.BACKUP_RUNNER_ENABLED == 'true' && vars.BACKUP_ZERO_COST_VERIFIED == 'true' && (github.event_name == 'workflow_dispatch' || vars.BACKUP_SCHEDULE_ENABLED == 'true')
+    if: vars.BACKUP_RUNNER_ENABLED == 'true' && vars.BACKUP_ZERO_COST_VERIFIED == 'true' && ((github.event_name == 'workflow_dispatch' && inputs.mode != 'scheduled-backup') || vars.BACKUP_SCHEDULE_ENABLED == 'true')
     environment: backup-staging
     runs-on: ubuntu-24.04
     # Initial pack construction reads each source once; subsequent copies reuse packs.
@@ -41,13 +41,13 @@ jobs:
         run: npm test
       - name: Check twelve-hour snapshot cadence
         id: cadence
-        if: github.event_name == 'schedule' || inputs.mode == 'cadence-check'
+        if: github.event_name == 'schedule' || inputs.mode == 'cadence-check' || inputs.mode == 'scheduled-backup'
         working-directory: scripts/backup
         env:
           XFINDER_ENVIRONMENT: staging
           BACKUP_TRIGGER_CRON: ${{ github.event.schedule }}
           BACKUP_ZERO_COST_VERIFIED: ${{ vars.BACKUP_ZERO_COST_VERIFIED }}
-          DATABASE_BACKUP_ENABLED: ${{ vars.DATABASE_BACKUP_ENABLED == 'true' && (github.event_name != 'schedule' || vars.DATABASE_BACKUP_SCHEDULE_ENABLED == 'true') && 'true' || 'false' }}
+          DATABASE_BACKUP_ENABLED: ${{ vars.DATABASE_BACKUP_ENABLED == 'true' && ((github.event_name != 'schedule' && inputs.mode != 'scheduled-backup') || vars.DATABASE_BACKUP_SCHEDULE_ENABLED == 'true') && 'true' || 'false' }}
           DATABASE_READER_URL: ${{ secrets.DATABASE_READER_URL }}
           DATABASE_SSL_CA: ${{ secrets.DATABASE_SSL_CA }}
           DATABASE_MANAGED_PUBLIC_WRITES_ACCEPTED: ${{ vars.DATABASE_MANAGED_PUBLIC_WRITES_ACCEPTED }}
@@ -64,16 +64,16 @@ jobs:
           AGE_RECIPIENT: ${{ secrets.AGE_RECIPIENT }}
         run: node run.mjs schedule-check
       - name: Prepare pinned database client
-        if: vars.DATABASE_BACKUP_ENABLED == 'true' && (github.event_name != 'schedule' || vars.DATABASE_BACKUP_SCHEDULE_ENABLED == 'true') && ((github.event_name == 'schedule' && steps.cadence.outputs.due == 'true') || (github.event_name != 'schedule' && inputs.mode != 'selftest' && inputs.mode != 'cadence-check'))
+        if: vars.DATABASE_BACKUP_ENABLED == 'true' && ((github.event_name != 'schedule' && inputs.mode != 'scheduled-backup') || vars.DATABASE_BACKUP_SCHEDULE_ENABLED == 'true') && (((github.event_name == 'schedule' || inputs.mode == 'scheduled-backup') && steps.cadence.outputs.due == 'true') || (github.event_name != 'schedule' && inputs.mode != 'scheduled-backup' && inputs.mode != 'selftest' && inputs.mode != 'cadence-check'))
         run: docker pull postgres@sha256:a77aa70e641402a21411b92b721c58d10f23b50ae5fdd2333efd22d166e1e5f7
       - name: Run bounded staging backup
-        if: (github.event_name == 'schedule' && steps.cadence.outputs.due == 'true') || (github.event_name != 'schedule' && inputs.mode != 'selftest' && inputs.mode != 'cadence-check')
+        if: ((github.event_name == 'schedule' || inputs.mode == 'scheduled-backup') && steps.cadence.outputs.due == 'true') || (github.event_name != 'schedule' && inputs.mode != 'scheduled-backup' && inputs.mode != 'selftest' && inputs.mode != 'cadence-check')
         working-directory: scripts/backup
         env:
           XFINDER_ENVIRONMENT: staging
           BACKUP_TRIGGER_CRON: ${{ github.event.schedule }}
           BACKUP_ZERO_COST_VERIFIED: ${{ vars.BACKUP_ZERO_COST_VERIFIED }}
-          DATABASE_BACKUP_ENABLED: ${{ vars.DATABASE_BACKUP_ENABLED == 'true' && (github.event_name != 'schedule' || vars.DATABASE_BACKUP_SCHEDULE_ENABLED == 'true') && 'true' || 'false' }}
+          DATABASE_BACKUP_ENABLED: ${{ vars.DATABASE_BACKUP_ENABLED == 'true' && ((github.event_name != 'schedule' && inputs.mode != 'scheduled-backup') || vars.DATABASE_BACKUP_SCHEDULE_ENABLED == 'true') && 'true' || 'false' }}
           DATABASE_READER_URL: ${{ secrets.DATABASE_READER_URL }}
           DATABASE_SSL_CA: ${{ secrets.DATABASE_SSL_CA }}
           DATABASE_MANAGED_PUBLIC_WRITES_ACCEPTED: ${{ vars.DATABASE_MANAGED_PUBLIC_WRITES_ACCEPTED }}
@@ -88,5 +88,5 @@ jobs:
           B2_WRITE_KEY_ID: ${{ secrets.B2_WRITE_KEY_ID }}
           B2_WRITE_KEY: ${{ secrets.B2_WRITE_KEY }}
           AGE_RECIPIENT: ${{ secrets.AGE_RECIPIENT }}
-          BACKUP_MODE: ${{ github.event_name == 'schedule' && 'backup' || inputs.mode }}
+          BACKUP_MODE: ${{ (github.event_name == 'schedule' || inputs.mode == 'scheduled-backup') && 'backup' || inputs.mode }}
         run: node run.mjs "$BACKUP_MODE"
