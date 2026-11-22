@@ -146,7 +146,7 @@ schedule gate only after the actual encrypted dump, isolated restore and
 independent database-age monitoring have passed. The database schedule gate
 remains separate from the manual rehearsal gate.
 
-The cron `8,23,38,53 * * * *` provides 96 daily retry opportunities. Before
+The cron `8,23,38,53 * * * *` explicitly uses `Etc/UTC` and provides 96 daily retry opportunities. Before
 pulling the database image or reading source data, each scheduled job downloads
 only the bounded 4 KiB staging health marker. A copy is due twelve hours after
 the last database capture (or file completion while database capture is disabled).
