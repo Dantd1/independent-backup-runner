@@ -15,6 +15,7 @@ import { X509Certificate } from "node:crypto";
 import {
   b2Url,
   CAP,
+  checkBackupCadence,
   configFromEnv,
   DAY,
   digest,
@@ -68,6 +69,83 @@ test("schedule telemetry distinguishes UTC windows, rollover and legacy events",
     () => scheduleObservation("schedule", "23 3 * * *", "invalid"),
     /invalid_schedule_clock/,
   );
+});
+test("cadence reads only bounded staging health and never runs early or on invalid markers", async () => {
+  const captured = Date.parse("2026-11-22T03:00:00Z");
+  const health = {
+    format: "xfinder-backup-health-v1",
+    environment: "staging",
+    databaseCapturedAt: new Date(captured).toISOString(),
+    completedAt: new Date(captured + 600000).toISOString(),
+    databaseTables: 177,
+  };
+  const reads = [];
+  const reader = {
+    read: async (name, limit) => {
+      reads.push({ name, limit });
+      return Buffer.from(JSON.stringify(health));
+    },
+  };
+  assert.equal(
+    (await checkBackupCadence(reader, captured + 12 * 3600000 - 1)).due,
+    false,
+  );
+  assert.equal(
+    (await checkBackupCadence(reader, captured + 12 * 3600000)).due,
+    true,
+  );
+  assert.equal(
+    (await checkBackupCadence(reader, captured + 16 * 3600000)).due,
+    true,
+  );
+  assert.equal(
+    (await checkBackupCadence(reader, captured + 12 * 3600000, false)).due,
+    false,
+  );
+  assert.equal(
+    (await checkBackupCadence(reader, captured + 600000 + 12 * 3600000, false))
+      .due,
+    true,
+  );
+  assert.ok(
+    reads.every((x) =>
+      x.name === "staging/health/success.json" && x.limit === 4096
+    ),
+  );
+  health.environment = "production";
+  await assert.rejects(
+    () => checkBackupCadence(reader, captured + 13 * 3600000),
+    /cadence_marker_scope_invalid/,
+  );
+  health.environment = "staging";
+  health.databaseCapturedAt = "invalid";
+  await assert.rejects(
+    () => checkBackupCadence(reader, captured + 13 * 3600000),
+    /cadence_marker_invalid/,
+  );
+  health.databaseCapturedAt = new Date(captured + 20 * 3600000).toISOString();
+  await assert.rejects(
+    () => checkBackupCadence(reader, captured + 13 * 3600000),
+    /cadence_marker_invalid/,
+  );
+  health.databaseCapturedAt = new Date(captured).toISOString();
+  health.databaseTables = 0;
+  await assert.rejects(
+    () => checkBackupCadence(reader, captured + 13 * 3600000),
+    /cadence_marker_invalid/,
+  );
+  await assert.rejects(() =>
+    checkBackupCadence({
+      read: async () => {
+        throw Error("unavailable");
+      },
+    }), /unavailable/);
+  const periodic = scheduleObservation(
+    "schedule",
+    "8,23,38,53 * * * *",
+    "2026-11-22T03:39:00Z",
+  );
+  assert.equal(periodic.inferredScheduledAt, "2026-11-22T03:38:00.000Z");
 });
 const scope = {
   environment: "staging",

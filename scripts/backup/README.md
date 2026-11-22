@@ -143,15 +143,30 @@ not prove full decryption, bootstrap, or the complete service recovery time.
 The workflow separates manual database rehearsals (`DATABASE_BACKUP_ENABLED`)
 from recurring database capture (`DATABASE_BACKUP_SCHEDULE_ENABLED`). Enable the
 schedule gate only after the actual encrypted dump, isolated restore and
-independent database-age monitoring have passed. The file backup cron remains
-unchanged while the database extension is gated.
+independent database-age monitoring have passed. The database schedule gate
+remains separate from the manual rehearsal gate.
 
-The two UTC windows are separate cron expressions (`23 3 * * *` and
-`23 15 * * *`); frequency remains twice daily. The runner logs only the matched
-expression, UTC start, inferred latest matching date and inferred delay. GitHub
-does not supply the authoritative scheduled date; these fields cannot establish
-the exact origin of a delayed event. Legacy combined expressions remain accepted
-for events already queued. Manual dispatch never proves scheduled cadence.
-GitHub scheduling is best effort, so two cron entries do not guarantee starts
-exactly twelve hours apart. Compare actual database capture timestamps and retain
-independent age monitoring before claiming RPO or regular cadence.
+The cron `8,23,38,53 * * * *` provides 96 daily retry opportunities. Before
+pulling the database image or reading source data, each scheduled job downloads
+only the bounded 4 KiB staging health marker. A copy is due twelve hours after
+the last database capture (or file completion while database capture is disabled).
+Fresh markers skip the image pull and backup entirely. Missing, malformed,
+production, future or invalid database markers fail closed. Manual `cadence-check`
+tests this decision without writing a backup/attempt marker. Explicit manual
+backup/recovery operations remain possible. Whole-job concurrency serializes
+the freshness check and copy, so delayed queued jobs recheck the latest marker.
+
+This replaces the fixed 00:23/12:23 Sao Paulo copy windows: the next copy is
+anchored to the last successful database capture, not wall-clock slots. It adds
+at most 96 small marker reads/authentications daily, using existing scoped keys,
+the public standard Linux runner and unchanged hard free caps. Source reads,
+retention renewal and encrypted uploads occur only when due, normally twice daily.
+
+The runner logs only matched expression, UTC start, inferred latest matching
+date/delay and the cadence decision. GitHub does not provide the authoritative
+scheduled date. Old combined/separate expressions remain accepted for queued
+events, and all scheduled jobs use the same freshness guard after publication.
+Manual dispatch does not prove automatic cadence. Retry opportunities reduce
+dependence on one event but cannot guarantee exact twelve-hour starts if GitHub
+stops delivering all events. Keep independent monitoring and compare real capture
+timestamps before claiming operational cadence or RPO/RTO.

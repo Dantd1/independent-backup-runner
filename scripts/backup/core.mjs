@@ -9,15 +9,24 @@ export function scheduleObservation(event, cron, now = new Date()) {
   if (event !== "schedule") {
     return { event: "manual", startedAt: started.toISOString() };
   }
-  const hours =
-    { "23 3 * * *": [3], "23 15 * * *": [15], "23 3,15 * * *": [3, 15] }[cron];
-  requireSafe(!!hours, "unexpected_backup_schedule");
-  const candidates = hours.map((hour) => {
-    const at = new Date(started);
-    at.setUTCHours(hour, 23, 0, 0);
-    if (at > started) at.setUTCDate(at.getUTCDate() - 1);
-    return at.getTime();
-  });
+  const windows = {
+    "23 3 * * *": { hours: [3], minutes: [23] },
+    "23 15 * * *": { hours: [15], minutes: [23] },
+    "23 3,15 * * *": { hours: [3, 15], minutes: [23] },
+    "8,23,38,53 * * * *": {
+      hours: Array.from({ length: 24 }, (_, i) => i),
+      minutes: [8, 23, 38, 53],
+    },
+  }[cron];
+  requireSafe(!!windows, "unexpected_backup_schedule");
+  const candidates = windows.hours.flatMap((hour) =>
+    windows.minutes.map((minute) => {
+      const at = new Date(started);
+      at.setUTCHours(hour, minute, 0, 0);
+      if (at > started) at.setUTCDate(at.getUTCDate() - 1);
+      return at.getTime();
+    })
+  );
   const inferred = Math.max(...candidates);
   return {
     event: "schedule",
@@ -26,6 +35,41 @@ export function scheduleObservation(event, cron, now = new Date()) {
     inferredScheduledAt: new Date(inferred).toISOString(),
     inferredDelaySeconds: Math.floor((started.getTime() - inferred) / 1000),
     scheduledDateIsInferred: true,
+    targetIntervalHours: 12,
+  };
+}
+export async function checkBackupCadence(
+  b2,
+  now = Date.now(),
+  requireDatabase = true,
+) {
+  const health = JSON.parse(
+    (await b2.read("staging/health/success.json", 4096)).toString("utf8"),
+  );
+  requireSafe(
+    health?.format === "xfinder-backup-health-v1" &&
+      health.environment === "staging",
+    "cadence_marker_scope_invalid",
+  );
+  const completed = Date.parse(health.completedAt);
+  const captured = Date.parse(
+    requireDatabase ? health.databaseCapturedAt : health.completedAt,
+  );
+  requireSafe(
+    Number.isFinite(now) && Number.isFinite(completed) &&
+      Number.isFinite(captured) &&
+      captured <= completed + 300000 && completed <= now + 300000 &&
+      captured <= now + 300000 &&
+      (!requireDatabase ||
+        (Number.isSafeInteger(health.databaseTables) &&
+          health.databaseTables > 0)),
+    "cadence_marker_invalid",
+  );
+  return {
+    due: now - captured >= DAY / 2,
+    databaseRequired: requireDatabase,
+    lastCapturedAt: new Date(captured).toISOString(),
+    ageSeconds: Math.max(0, Math.floor((now - captured) / 1000)),
     targetIntervalHours: 12,
   };
 }

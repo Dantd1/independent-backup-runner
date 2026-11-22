@@ -1,6 +1,8 @@
 import * as age from "age-encryption";
 import process from "node:process";
+import { appendFileSync } from "node:fs";
 import {
+  checkBackupCadence,
   configFromEnv,
   recordAttempt,
   requireSafe,
@@ -19,48 +21,59 @@ try {
   }));
   const config = configFromEnv(process.env);
   providers = await connectProviders(config);
-  const cipher = new age.Encrypter();
-  cipher.addRecipient(config.AGE_RECIPIENT);
-  if (process.argv[2] === "database-probe") {
-    requireSafe(!!providers.database, "database_configuration_required");
+  if (process.argv[2] === "schedule-check") {
+    const decision = await checkBackupCadence(
+      providers.b2,
+      Date.now(),
+      !!config.databaseRole,
+    );
+    requireSafe(!!process.env.GITHUB_OUTPUT, "schedule_output_required");
+    appendFileSync(process.env.GITHUB_OUTPUT, `due=${decision.due}\n`);
+    console.log(JSON.stringify({ telemetry: "backup_cadence", ...decision }));
+  } else {
+    const cipher = new age.Encrypter();
+    cipher.addRecipient(config.AGE_RECIPIENT);
+    if (process.argv[2] === "database-probe") {
+      requireSafe(!!providers.database, "database_configuration_required");
+    }
+    const result = process.argv[2] === "database-probe"
+      ? await providers.database.probe()
+      : await snapshot({
+        ...providers,
+        scope: config.scope,
+        encrypter: cipher,
+        log: ({ phase, completed, total }) => {
+          if (
+            ["copy", "recovery_pack"].includes(phase) &&
+            Number.isSafeInteger(completed) && Number.isSafeInteger(total)
+          ) {
+            console.log(JSON.stringify({ phase, completed, total }));
+          }
+        },
+        mode: process.argv[2] === "backup-packed" ? "backup" : process.argv[2],
+        recoveryPacks: process.argv[2] === "backup-packed" ||
+          process.env.BACKUP_RECOVERY_PACKS_ENABLED === "true",
+      });
+    if (["backup", "backup-packed"].includes(process.argv[2])) {
+      await recordAttempt(providers.b2, "success").catch(() => {
+        console.warn(
+          JSON.stringify({
+            telemetry: "attempt_unavailable",
+            environment: "staging",
+          }),
+        );
+      });
+    }
+    // Public runners must not expose resource identifiers, inventory, or object paths.
+    console.log(
+      JSON.stringify({
+        status: result.status,
+        environment: "staging",
+        capacityWarning: result.capacityWarning ?? false,
+        paidUsageAuthorized: false,
+      }),
+    );
   }
-  const result = process.argv[2] === "database-probe"
-    ? await providers.database.probe()
-    : await snapshot({
-      ...providers,
-      scope: config.scope,
-      encrypter: cipher,
-      log: ({ phase, completed, total }) => {
-        if (
-          ["copy", "recovery_pack"].includes(phase) &&
-          Number.isSafeInteger(completed) && Number.isSafeInteger(total)
-        ) {
-          console.log(JSON.stringify({ phase, completed, total }));
-        }
-      },
-      mode: process.argv[2] === "backup-packed" ? "backup" : process.argv[2],
-      recoveryPacks: process.argv[2] === "backup-packed" ||
-        process.env.BACKUP_RECOVERY_PACKS_ENABLED === "true",
-    });
-  if (["backup", "backup-packed"].includes(process.argv[2])) {
-    await recordAttempt(providers.b2, "success").catch(() => {
-      console.warn(
-        JSON.stringify({
-          telemetry: "attempt_unavailable",
-          environment: "staging",
-        }),
-      );
-    });
-  }
-  // Public runners must not expose resource identifiers, inventory, or object paths.
-  console.log(
-    JSON.stringify({
-      status: result.status,
-      environment: "staging",
-      capacityWarning: result.capacityWarning ?? false,
-      paidUsageAuthorized: false,
-    }),
-  );
 } catch (e) {
   if (providers && ["backup", "backup-packed"].includes(process.argv[2])) {
     await recordAttempt(providers.b2, "failure").catch(() => {

@@ -7,14 +7,13 @@ name: Independent staging backup
 run-name: Staging backup — ${{ inputs.mode || 'backup' }}
 on:
   schedule:
-    # Separate expressions make github.event.schedule identify each UTC window.
-    - cron: "23 3 * * *"
-    - cron: "23 15 * * *"
+    # Retry opportunities; the B2 snapshot clock gates copies to twelve hours.
+    - cron: "8,23,38,53 * * * *"
   workflow_dispatch:
     inputs:
       mode:
         type: choice
-        options: [selftest, inventory, database-probe, backup, backup-packed]
+        options: [selftest, cadence-check, inventory, database-probe, backup, backup-packed]
         default: selftest
 permissions:
   contents: read
@@ -39,11 +38,35 @@ jobs:
         run: npm ci --ignore-scripts --no-audit --no-fund
       - working-directory: scripts/backup
         run: npm test
+      - name: Check twelve-hour snapshot cadence
+        id: cadence
+        if: github.event_name == 'schedule' || inputs.mode == 'cadence-check'
+        working-directory: scripts/backup
+        env:
+          XFINDER_ENVIRONMENT: staging
+          BACKUP_TRIGGER_CRON: ${{ github.event.schedule }}
+          BACKUP_ZERO_COST_VERIFIED: ${{ vars.BACKUP_ZERO_COST_VERIFIED }}
+          DATABASE_BACKUP_ENABLED: ${{ vars.DATABASE_BACKUP_ENABLED == 'true' && (github.event_name != 'schedule' || vars.DATABASE_BACKUP_SCHEDULE_ENABLED == 'true') && 'true' || 'false' }}
+          DATABASE_READER_URL: ${{ secrets.DATABASE_READER_URL }}
+          DATABASE_SSL_CA: ${{ secrets.DATABASE_SSL_CA }}
+          DATABASE_MANAGED_PUBLIC_WRITES_ACCEPTED: ${{ vars.DATABASE_MANAGED_PUBLIC_WRITES_ACCEPTED }}
+          BACKUP_RECOVERY_PACKS_ENABLED: ${{ vars.BACKUP_RECOVERY_PACKS_ENABLED }}
+          BACKUP_SCOPE_JSON: ${{ secrets.BACKUP_SCOPE_JSON }}
+          STORAGE_READER_ID: ${{ secrets.STORAGE_READER_ID }}
+          STORAGE_READER_KEY: ${{ secrets.STORAGE_READER_KEY }}
+          SITES_READER_ID: ${{ secrets.SITES_READER_ID }}
+          SITES_READER_KEY: ${{ secrets.SITES_READER_KEY }}
+          B2_READ_KEY_ID: ${{ secrets.B2_READ_KEY_ID }}
+          B2_READ_KEY: ${{ secrets.B2_READ_KEY }}
+          B2_WRITE_KEY_ID: ${{ secrets.B2_WRITE_KEY_ID }}
+          B2_WRITE_KEY: ${{ secrets.B2_WRITE_KEY }}
+          AGE_RECIPIENT: ${{ secrets.AGE_RECIPIENT }}
+        run: node run.mjs schedule-check
       - name: Prepare pinned database client
-        if: vars.DATABASE_BACKUP_ENABLED == 'true' && (github.event_name != 'schedule' || vars.DATABASE_BACKUP_SCHEDULE_ENABLED == 'true') && (github.event_name == 'schedule' || inputs.mode != 'selftest')
+        if: vars.DATABASE_BACKUP_ENABLED == 'true' && (github.event_name != 'schedule' || vars.DATABASE_BACKUP_SCHEDULE_ENABLED == 'true') && ((github.event_name == 'schedule' && steps.cadence.outputs.due == 'true') || (github.event_name != 'schedule' && inputs.mode != 'selftest' && inputs.mode != 'cadence-check'))
         run: docker pull postgres@sha256:a77aa70e641402a21411b92b721c58d10f23b50ae5fdd2333efd22d166e1e5f7
       - name: Run bounded staging backup
-        if: github.event_name == 'schedule' || inputs.mode != 'selftest'
+        if: (github.event_name == 'schedule' && steps.cadence.outputs.due == 'true') || (github.event_name != 'schedule' && inputs.mode != 'selftest' && inputs.mode != 'cadence-check')
         working-directory: scripts/backup
         env:
           XFINDER_ENVIRONMENT: staging
