@@ -19,8 +19,10 @@ import {
   configFromEnv,
   DAY,
   digest,
+  normalizeR2RecordMetadata,
   parseR2List,
   recordAttempt,
+  recoveredR2Properties,
   requireSpace,
   scheduleObservation,
   snapshot,
@@ -516,6 +518,9 @@ async function fixture() {
       catalog.objects[0].updated = "changed";
     },
     catalogCalls: () => catalogCalls,
+    setR2Metadata(value) {
+      Object.assign(r2Item, value);
+    },
   };
 }
 test("inventory performs no writes, retention changes or credential archive rewrites", async () => {
@@ -524,6 +529,108 @@ test("inventory performs no writes, retention changes or credential archive rewr
   assert.equal(result.status, "inventory_verified");
   assert.deepEqual(f.writes, []);
   assert.deepEqual(f.extensions, []);
+});
+
+test("R2 metadata survives encrypted manifests and metadata-only changes reuse the body", async () => {
+  const f = await fixture(), decrypt = new age.Decrypter();
+  decrypt.addIdentity(f.identity);
+  const first = await snapshot(f);
+  const original = JSON.parse(
+    await decrypt.decrypt(f.payloads.get(first.manifest), "text"),
+  );
+  const metadata = {
+    metadataFormat: "xfinder-r2-metadata-v1",
+    storageClass: "Standard",
+    httpEtag: '"r2-etag"',
+    httpMetadata: {
+      contentType: "text/html; charset=utf-8",
+      contentLanguage: "pt-BR",
+      contentEncoding: "gzip",
+      contentDisposition: "inline",
+      cacheControl: "public, max-age=60",
+      cacheExpiry: "2027-01-01T00:00:00.000Z",
+    },
+    customMetadata: { revision: "synthetic" },
+  };
+  f.setR2Metadata(metadata);
+  const next = await snapshot({ ...f, now: f.now + DAY });
+  const manifest = JSON.parse(
+    await decrypt.decrypt(f.payloads.get(next.manifest), "text"),
+  );
+  const record = manifest.records.find((r) => r.kind === "r2");
+  assert.equal(
+    record.destination.object,
+    original.records.find((r) => r.kind === "r2").destination.object,
+  );
+  assert.deepEqual(record.source.httpMetadata, metadata.httpMetadata);
+  assert.deepEqual(record.source.customMetadata, metadata.customMetadata);
+  assert.equal(manifest.r2MetadataCoverage.complete, true);
+  const recovered = recoveredR2Properties(record.source);
+  assert.equal(recovered.preserved, true);
+  assert.equal(recovered.headers.get("Content-Encoding"), "gzip");
+  assert.equal(recovered.headers.get("ETag"), '"r2-etag"');
+  assert.ok(recovered.httpMetadata.cacheExpiry instanceof Date);
+  assert.deepEqual(recovered.customMetadata, metadata.customMetadata);
+  assert.equal(
+    recoveredR2Properties(original.records.find((r) => r.kind === "r2").source)
+      .preserved,
+    false,
+  );
+});
+
+test("metadata errors and nonfree R2 storage classes fail before object reads", async () => {
+  const valid = {
+    metadataFormat: "xfinder-r2-metadata-v1",
+    storageClass: "Standard",
+    httpEtag: '"synthetic"',
+    httpMetadata: {},
+    customMetadata: {},
+  };
+  assert.throws(
+    () => normalizeR2RecordMetadata({ ...valid, customMetadata: undefined }),
+    /metadata_missing/,
+  );
+  assert.throws(
+    () => normalizeR2RecordMetadata({ ...valid, metadataFormat: "unknown" }),
+    /version_denied/,
+  );
+  assert.throws(
+    () =>
+      normalizeR2RecordMetadata({
+        ...valid,
+        httpMetadata: { contentType: "text/html\r\ninjected: value" },
+      }),
+    /metadata_invalid/,
+  );
+  const f = await fixture();
+  let reads = 0;
+  f.r2.read = () => {
+    reads++;
+    throw Error("must not read nonfree data");
+  };
+  f.setR2Metadata({ ...valid, storageClass: "InfrequentAccess" });
+  await assert.rejects(snapshot(f), /nonfree_storage_class_denied/);
+  assert.equal(reads, 0);
+});
+
+test("a metadata change during capture prevents committing the snapshot", async () => {
+  const f = await fixture();
+  f.setR2Metadata({
+    metadataFormat: "xfinder-r2-metadata-v1",
+    storageClass: "Standard",
+    httpEtag: '"r2-etag"',
+    httpMetadata: { contentType: "text/html" },
+    customMetadata: {},
+  });
+  const list = f.r2.list;
+  let calls = 0;
+  f.r2.list = async () => {
+    const records = await list();
+    if (++calls > 1) records[0].httpMetadata.cacheControl = "no-store";
+    return records;
+  };
+  await assert.rejects(snapshot(f), /r2_changed_during_backup/);
+  assert.equal(f.writes.includes("staging/health/success.json"), false);
 });
 test("encrypted snapshot restores all fixture sources, then reuses unchanged blobs and extends protection", async () => {
   const f = await fixture();

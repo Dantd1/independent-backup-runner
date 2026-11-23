@@ -2,6 +2,115 @@ import { createHash, randomUUID, X509Certificate } from "node:crypto";
 import { Buffer } from "node:buffer";
 export const CAP = 9_000_000_000;
 export const DAY = 86400000;
+export const R2_METADATA_FORMAT = "xfinder-r2-metadata-v1";
+export function normalizeR2RecordMetadata(record) {
+  if (record.metadataFormat === undefined) return { ...record };
+  requireSafe(
+    record.metadataFormat === R2_METADATA_FORMAT,
+    "r2_metadata_version_denied",
+  );
+  const dictionary = (value, http = false) => {
+    requireSafe(
+      value && typeof value === "object" && !Array.isArray(value),
+      "r2_metadata_missing",
+    );
+    const allowed = [
+      "contentType",
+      "contentLanguage",
+      "contentDisposition",
+      "contentEncoding",
+      "cacheControl",
+      "cacheExpiry",
+    ];
+    const entries = Object.entries(value).sort(([a], [b]) =>
+      a.localeCompare(b)
+    );
+    requireSafe(JSON.stringify(value).length <= 65536, "r2_metadata_limit");
+    for (const [key, item] of entries) {
+      requireSafe(
+        key.length > 0 && key.length <= 1024 && typeof item === "string" &&
+          item.length <= 8192 && !/[\r\n\0]/.test(key + item),
+        "r2_metadata_invalid",
+      );
+      if (http) {
+        requireSafe(allowed.includes(key), "r2_http_metadata_field_denied");
+      }
+      if (http && key === "cacheExpiry") {
+        requireSafe(Number.isFinite(Date.parse(item)), "r2_expiry_invalid");
+      }
+    }
+    return Object.fromEntries(entries);
+  };
+  requireSafe(
+    record.storageClass === "Standard",
+    "r2_nonfree_storage_class_denied",
+  );
+  requireSafe(
+    typeof record.httpEtag === "string" &&
+      /^"[^"\r\n\0]+"$/.test(record.httpEtag),
+    "r2_http_etag_invalid",
+  );
+  return {
+    ...record,
+    httpMetadata: dictionary(record.httpMetadata, true),
+    customMetadata: dictionary(record.customMetadata),
+  };
+}
+export function recoveredR2Properties(record) {
+  const item = normalizeR2RecordMetadata(record);
+  const preserved = item.metadataFormat === R2_METADATA_FORMAT;
+  const fallback = {
+    html: "text/html; charset=utf-8",
+    css: "text/css",
+    js: "application/javascript",
+    webp: "image/webp",
+    png: "image/png",
+    jpg: "image/jpeg",
+    avif: "image/avif",
+    svg: "image/svg+xml",
+    woff2: "font/woff2",
+  };
+  const httpMetadata = preserved ? { ...item.httpMetadata } : {
+    contentType: fallback[item.key?.split(".").at(-1)] ||
+      "application/octet-stream",
+  };
+  if (httpMetadata.cacheExpiry) {
+    httpMetadata.cacheExpiry = new Date(httpMetadata.cacheExpiry);
+  }
+  const headers = new Headers();
+  for (
+    const [field, name] of Object.entries({
+      contentType: "Content-Type",
+      contentLanguage: "Content-Language",
+      contentDisposition: "Content-Disposition",
+      contentEncoding: "Content-Encoding",
+      cacheControl: "Cache-Control",
+      cacheExpiry: "Expires",
+    })
+  ) {
+    if (httpMetadata[field] !== undefined) {
+      headers.set(
+        name,
+        field === "cacheExpiry"
+          ? httpMetadata[field].toUTCString()
+          : httpMetadata[field],
+      );
+    }
+  }
+  const etag = preserved
+    ? item.httpEtag
+    : typeof item.etag === "string"
+    ? '"' + item.etag.replace(/^"|"$/g, "") + '"'
+    : undefined;
+  if (etag) headers.set("ETag", etag);
+  return {
+    preserved,
+    httpMetadata,
+    customMetadata: preserved ? { ...item.customMetadata } : {},
+    headers,
+    etag,
+  };
+}
 // The event contains a cron expression, not an authoritative scheduled date.
 export function scheduleObservation(event, cron, now = new Date()) {
   const started = new Date(now);
@@ -378,7 +487,7 @@ export async function snapshot(
   let used = existing.bytes;
   requireSpace(used, 0);
   const catalog = await storage.list(),
-    cloud = await r2.list(),
+    cloud = (await r2.list()).map(normalizeR2RecordMetadata),
     keys = await kv.list();
   requireSafe(
     Array.isArray(catalog.buckets) && Array.isArray(catalog.objects),
@@ -759,7 +868,8 @@ export async function snapshot(
     "storage_changed_during_backup",
   );
   requireSafe(
-    JSON.stringify(cloud) === JSON.stringify(await r2.list()),
+    JSON.stringify(cloud) ===
+      JSON.stringify((await r2.list()).map(normalizeR2RecordMetadata)),
     "r2_changed_during_backup",
   );
   for (const sample of samples) {
@@ -780,6 +890,16 @@ export async function snapshot(
       supabase: scope.projectRef,
       r2: scope.r2Bucket,
       kv: scope.kvNamespace,
+    },
+    r2MetadataCoverage: {
+      format: R2_METADATA_FORMAT,
+      objects: cloud.length,
+      preserved:
+        cloud.filter((item) => item.metadataFormat === R2_METADATA_FORMAT)
+          .length,
+      complete: cloud.every((item) =>
+        item.metadataFormat === R2_METADATA_FORMAT
+      ),
     },
     buckets: catalog.buckets,
     records: out,
