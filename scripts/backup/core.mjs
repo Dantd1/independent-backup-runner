@@ -330,6 +330,15 @@ export function configFromEnv(env) {
     config.allowManagedPublicWrites =
       env.DATABASE_MANAGED_PUBLIC_WRITES_ACCEPTED === "true";
   }
+  if (env.CONFIGURATION_BACKUP_ENABLED === "true") {
+    try {
+      config.configurationScope = JSON.parse(env.CONFIGURATION_SCOPE_JSON);
+    } catch {
+      requireSafe(false, "configuration_scope_required");
+    }
+    config.configurationSupabaseToken = env.CONFIGURATION_SUPABASE_TOKEN;
+    config.configurationCloudflareToken = env.CONFIGURATION_CLOUDFLARE_TOKEN;
+  }
   return config;
 }
 

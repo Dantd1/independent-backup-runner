@@ -14,7 +14,7 @@ on:
     inputs:
       mode:
         type: choice
-        options: [selftest, cadence-check, scheduled-backup, inventory, database-probe, backup, backup-packed]
+        options: [selftest, cadence-check, scheduled-backup, inventory, database-probe, backup, backup-packed, configuration-backup]
         default: selftest
 permissions:
   contents: read
@@ -64,10 +64,10 @@ jobs:
           AGE_RECIPIENT: ${{ secrets.AGE_RECIPIENT }}
         run: node run.mjs schedule-check
       - name: Prepare pinned database client
-        if: vars.DATABASE_BACKUP_ENABLED == 'true' && ((github.event_name != 'schedule' && inputs.mode != 'scheduled-backup') || vars.DATABASE_BACKUP_SCHEDULE_ENABLED == 'true') && (((github.event_name == 'schedule' || inputs.mode == 'scheduled-backup') && steps.cadence.outputs.due == 'true') || (github.event_name != 'schedule' && inputs.mode != 'scheduled-backup' && inputs.mode != 'selftest' && inputs.mode != 'cadence-check'))
+        if: vars.DATABASE_BACKUP_ENABLED == 'true' && inputs.mode != 'configuration-backup' && ((github.event_name != 'schedule' && inputs.mode != 'scheduled-backup') || vars.DATABASE_BACKUP_SCHEDULE_ENABLED == 'true') && (((github.event_name == 'schedule' || inputs.mode == 'scheduled-backup') && steps.cadence.outputs.due == 'true') || (github.event_name != 'schedule' && inputs.mode != 'scheduled-backup' && inputs.mode != 'selftest' && inputs.mode != 'cadence-check'))
         run: docker pull postgres@sha256:a77aa70e641402a21411b92b721c58d10f23b50ae5fdd2333efd22d166e1e5f7
       - name: Run bounded staging backup
-        if: ((github.event_name == 'schedule' || inputs.mode == 'scheduled-backup') && steps.cadence.outputs.due == 'true') || (github.event_name != 'schedule' && inputs.mode != 'scheduled-backup' && inputs.mode != 'selftest' && inputs.mode != 'cadence-check')
+        if: ((github.event_name == 'schedule' || inputs.mode == 'scheduled-backup') && steps.cadence.outputs.due == 'true') || (github.event_name != 'schedule' && inputs.mode != 'scheduled-backup' && inputs.mode != 'selftest' && inputs.mode != 'cadence-check' && inputs.mode != 'configuration-backup')
         working-directory: scripts/backup
         env:
           XFINDER_ENVIRONMENT: staging
@@ -90,3 +90,24 @@ jobs:
           AGE_RECIPIENT: ${{ secrets.AGE_RECIPIENT }}
           BACKUP_MODE: ${{ (github.event_name == 'schedule' || inputs.mode == 'scheduled-backup') && 'backup' || inputs.mode }}
         run: node run.mjs "$BACKUP_MODE"
+      - name: Back up bounded platform configuration
+        if: vars.CONFIGURATION_BACKUP_ENABLED == 'true' && (inputs.mode == 'configuration-backup' || (vars.CONFIGURATION_BACKUP_SCHEDULE_ENABLED == 'true' && (((github.event_name == 'schedule' || inputs.mode == 'scheduled-backup') && steps.cadence.outputs.due == 'true') || inputs.mode == 'backup' || inputs.mode == 'backup-packed')))
+        working-directory: scripts/backup
+        env:
+          XFINDER_ENVIRONMENT: staging
+          BACKUP_ZERO_COST_VERIFIED: ${{ vars.BACKUP_ZERO_COST_VERIFIED }}
+          CONFIGURATION_BACKUP_ENABLED: "true"
+          CONFIGURATION_SCOPE_JSON: ${{ secrets.CONFIGURATION_SCOPE_JSON }}
+          CONFIGURATION_SUPABASE_TOKEN: ${{ secrets.CONFIGURATION_SUPABASE_TOKEN }}
+          CONFIGURATION_CLOUDFLARE_TOKEN: ${{ secrets.CONFIGURATION_CLOUDFLARE_TOKEN }}
+          BACKUP_SCOPE_JSON: ${{ secrets.BACKUP_SCOPE_JSON }}
+          STORAGE_READER_ID: ${{ secrets.STORAGE_READER_ID }}
+          STORAGE_READER_KEY: ${{ secrets.STORAGE_READER_KEY }}
+          SITES_READER_ID: ${{ secrets.SITES_READER_ID }}
+          SITES_READER_KEY: ${{ secrets.SITES_READER_KEY }}
+          B2_READ_KEY_ID: ${{ secrets.B2_READ_KEY_ID }}
+          B2_READ_KEY: ${{ secrets.B2_READ_KEY }}
+          B2_WRITE_KEY_ID: ${{ secrets.B2_WRITE_KEY_ID }}
+          B2_WRITE_KEY: ${{ secrets.B2_WRITE_KEY }}
+          AGE_RECIPIENT: ${{ secrets.AGE_RECIPIENT }}
+        run: node run.mjs configuration-backup

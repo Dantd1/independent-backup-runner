@@ -6,6 +6,7 @@ import postgres from "postgres";
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { lookup } from "node:dns/promises";
+import { connectConfigurationSource } from "./configuration.mjs";
 import {
   b2Url,
   DATABASE_CATALOG_SQL,
@@ -850,12 +851,21 @@ export function connectProviders(c, { fetcher = fetch } = {}) {
     },
   };
   const database = c.databaseUrl ? connectDatabase(c) : undefined;
+  const configuration = c.configurationScope
+    ? connectConfigurationSource({
+      scope: c.configurationScope,
+      base: c.scope,
+      supabaseToken: c.configurationSupabaseToken,
+      cloudflareToken: c.configurationCloudflareToken,
+    })
+    : undefined;
   return {
     storage,
     r2,
     kv,
     b2,
     database,
+    configuration,
     close: () => database?.close() || Promise.resolve(),
   };
 }

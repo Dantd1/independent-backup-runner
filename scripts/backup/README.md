@@ -39,6 +39,47 @@ downloading every legacy object where the account has daily request limits.
 
 ## Activation requirements
 
+### Optional platform configuration
+
+`configuration-backup` captures sanitized Supabase service settings and selected
+Cloudflare Access applications/policies/IdPs, Worker settings/schedules, DNS/TLS
+and routes. It never reads application data, private signing keys or secret values
+for this package, and never applies configuration to source services. Shared zone
+settings are dependencies to restore separately, not permission to reapply them.
+
+Supply `CONFIGURATION_BACKUP_ENABLED=true`, `CONFIGURATION_SCOPE_JSON`,
+`CONFIGURATION_SUPABASE_TOKEN` and `CONFIGURATION_CLOUDFLARE_TOKEN` only in the
+protected environment. The Supabase token must be project-scoped with Read in
+Auth Config, Data API Config, Database Config, Realtime Config and Storage Config.
+Cloudflare requires read-only Access/IdP, Workers metadata, DNS, routes and zone
+settings on selected resources. Account permissions can read beyond staging;
+the collector validates explicit staging application IDs/domains/Worker markers
+and filters shared routes. It does not install an administrative account token.
+
+Scope includes three `{id,domain}` apps, three staging Worker names, explicit
+IdP IDs, two `{id,name,dnsNames}` zones, two encrypted `escrowObjects` under
+`staging/credentials/`, and `readersExpireAt`; project/account must match the
+existing backup scope. Secret readers must be independently escrowed first.
+No real scope, credential or customer configuration belongs in this repository.
+
+Configuration copies have their own minimum twelve-hour marker, bounded GET-only
+source calls, a 512 KiB plaintext limit, encrypted readback and verified 30-day
+compliance. They fail closed at the existing 9 GB capacity guard. Missing secrets,
+escrow, capacity, source configuration or retention prevent publishing success.
+`staging/health/configuration-success.json` holds only time/count/expiry metadata.
+Access service-token selectors are public references and remain intact when
+credential fields are removed. Actual secret values require separate escrow.
+
+Manual commissioning uses `configuration-backup`. The workflow variable
+`CONFIGURATION_BACKUP_SCHEDULE_ENABLED` stays false until independent recovery
+has passed; it then includes configuration after due data backups. An independent
+scheduler must also dispatch configuration-only runs when its separate clock is
+due. No exact-minute SLA or complete platform recovery is implied.
+
+Synthetic tests cover redaction without widening policies, staging-only scope,
+GET-only transport, missing recovery material, retention/readback/capacity and the
+twelve-hour skip. Logs must contain only aggregate status/error codes.
+
 Optional database capture uses `DATABASE_BACKUP_ENABLED=true` only after its
 dedicated reader, `DATABASE_READER_URL`, trusted public `DATABASE_SSL_CA`,
 encrypted credential escrow and independent database-age monitoring have been

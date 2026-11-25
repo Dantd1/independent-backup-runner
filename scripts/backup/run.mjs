@@ -10,6 +10,7 @@ import {
   snapshot,
 } from "./core.mjs";
 import { connectProviders } from "./providers.mjs";
+import { backupConfiguration } from "./configuration-backup.mjs";
 let providers;
 try {
   console.log(JSON.stringify({
@@ -36,7 +37,13 @@ try {
     if (process.argv[2] === "database-probe") {
       requireSafe(!!providers.database, "database_configuration_required");
     }
-    const result = process.argv[2] === "database-probe"
+    const result = process.argv[2] === "configuration-backup"
+      ? await backupConfiguration({
+        source: providers.configuration,
+        b2: providers.b2,
+        encrypter: cipher,
+      })
+      : process.argv[2] === "database-probe"
       ? await providers.database.probe()
       : await snapshot({
         ...providers,

@@ -1,0 +1,127 @@
+import { Buffer } from "node:buffer";
+import { randomUUID } from "node:crypto";
+import {
+  CONFIGURATION_FORMAT,
+  CONFIGURATION_LIMIT,
+  validateConfigurationPackage,
+} from "./configuration.mjs";
+const DAY = 86400000;
+const check = (ok, code) => {
+  if (!ok) throw Object.assign(Error(code), { safeCode: code });
+};
+export async function backupConfiguration(
+  { source, b2, encrypter, now = Date.now() },
+) {
+  check(source && b2 && encrypter, "configuration_backup_not_enabled");
+  check(
+    Date.parse(source.scope.readersExpireAt) > now,
+    "configuration_readers_expired",
+  );
+  // This clock is independent of data snapshots; never overwrite it on a skipped run.
+  let previous;
+  try {
+    previous = JSON.parse(
+      Buffer.from(
+        await b2.read("staging/health/configuration-success.json", 4096),
+      ).toString(),
+    );
+  } catch (error) {
+    check(
+      error.safeCode === "provider_http_404",
+      "configuration_cadence_unavailable",
+    );
+  }
+  if (previous) {
+    const captured = Date.parse(previous.capturedAt),
+      completed = Date.parse(previous.completedAt);
+    check(
+      previous.format === "xfinder-configuration-health-v1" &&
+        previous.environment === "staging" &&
+        Number.isFinite(captured) && Number.isFinite(completed) &&
+        captured <= completed && completed <= now + 300000,
+      "configuration_cadence_marker_invalid",
+    );
+    if (now - captured < 12 * 3600000) {
+      return {
+        status: "configuration_snapshot_fresh",
+        environment: "staging",
+        due: false,
+      };
+    }
+  }
+  const inventory = await b2.inventory();
+  check(
+    Number.isSafeInteger(inventory.bytes) && inventory.bytes >= 0 &&
+      inventory.bytes + CONFIGURATION_LIMIT + 8192 <= 9e9,
+    "free_configuration_capacity_limit",
+  );
+  const until = now + 31 * DAY, minimum = now + 30 * DAY;
+  for (const object of source.scope.escrowObjects) {
+    const f = inventory.files.get(object);
+    check(f?.mode === "compliance", "configuration_reader_not_escrowed");
+    if (f.until < minimum) await b2.extend(f, until);
+  }
+  const captured = await source.capture();
+  try {
+    const summary = validateConfigurationPackage(captured.data, source.scope);
+    check(
+      captured.bytes.length <= CONFIGURATION_LIMIT,
+      "configuration_package_limit",
+    );
+    const object = "staging/configuration-snapshots/" +
+      new Date(now).toISOString().replace(/[:.]/g, "-") + "-" + randomUUID() +
+      "/configuration.age";
+    const encrypted = await encrypter.encrypt(captured.bytes);
+    check(
+      encrypted.length <= CONFIGURATION_LIMIT + 4096,
+      "configuration_ciphertext_limit",
+    );
+    const file = await b2.put(object, encrypted, { until, slot: 0 });
+    check(file.size === encrypted.length, "configuration_upload_size_mismatch");
+    const readback = await b2.read(object, CONFIGURATION_LIMIT + 4096);
+    check(
+      Buffer.from(readback).equals(Buffer.from(encrypted)),
+      "configuration_ciphertext_readback_failed",
+    );
+    const verified = await b2.inventory(), stored = verified.files.get(object);
+    check(
+      stored?.mode === "compliance" && stored.until >= minimum &&
+        verified.bytes <= 9e9,
+      "configuration_retention_unverified",
+    );
+    const completedAt = new Date().toISOString();
+    const health = {
+      format: "xfinder-configuration-health-v1",
+      environment: "staging",
+      capturedAt: captured.data.capturedAt,
+      completedAt,
+      bytes: file.size,
+      readersExpireAt: source.scope.readersExpireAt,
+      ...summary,
+    };
+    check(verified.bytes + 4096 <= 9e9, "free_configuration_capacity_limit");
+    await b2.put(
+      "staging/health/configuration-success.json",
+      Buffer.from(JSON.stringify(health)),
+      { until, slot: 0 },
+    );
+    return {
+      status: "configuration_snapshot_committed",
+      environment: "staging",
+      object,
+      fileId: file.id,
+      bytes: file.size,
+      capturedAt: captured.data.capturedAt,
+      completedAt,
+      retentionUntil: new Date(minimum).toISOString(),
+      summary,
+      readerEscrows: source.scope.escrowObjects,
+      format: CONFIGURATION_FORMAT,
+      ciphertextReadbackVerified: true,
+      sourceWrites: false,
+      productionChanged: false,
+    };
+  } finally {
+    captured.bytes.fill(0);
+  }
+}
