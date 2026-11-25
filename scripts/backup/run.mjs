@@ -10,7 +10,10 @@ import {
   snapshot,
 } from "./core.mjs";
 import { connectProviders } from "./providers.mjs";
-import { backupConfiguration } from "./configuration-backup.mjs";
+import {
+  backupConfiguration,
+  probeConfigurationDestination,
+} from "./configuration-backup.mjs";
 let providers;
 try {
   console.log(JSON.stringify({
@@ -37,7 +40,12 @@ try {
     if (process.argv[2] === "database-probe") {
       requireSafe(!!providers.database, "database_configuration_required");
     }
-    const result = process.argv[2] === "configuration-backup"
+    const result = process.argv[2] === "configuration-destination-probe"
+      ? await probeConfigurationDestination({
+        b2: providers.b2,
+        encrypter: cipher,
+      })
+      : process.argv[2] === "configuration-backup"
       ? await backupConfiguration({
         source: providers.configuration,
         b2: providers.b2,
@@ -107,6 +115,7 @@ try {
       status: "failed",
       environment: "staging",
       code: safe,
+      phase: /^[a-z_]+$/.test(e.safePhase ?? "") ? e.safePhase : undefined,
       paidUsageAuthorized: false,
     }),
   );

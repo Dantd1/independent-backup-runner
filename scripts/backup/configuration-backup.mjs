@@ -9,6 +9,61 @@ const DAY = 86400000;
 const check = (ok, code) => {
   if (!ok) throw Object.assign(Error(code), { safeCode: code });
 };
+async function phaseCall(phase, operation) {
+  try {
+    return await operation();
+  } catch (error) {
+    error.safePhase = phase;
+    throw error;
+  }
+}
+export async function probeConfigurationDestination({ b2, encrypter }) {
+  const now = Date.now(), until = now + 31 * DAY;
+  const before = await phaseCall(
+    "configuration_probe_inventory",
+    () => readConfigurationDestination(() => b2.inventory()),
+  );
+  check(before.bytes + 8192 < 9e9, "free_configuration_capacity_limit");
+  const bytes = await encrypter.encrypt(
+    Buffer.from(
+      JSON.stringify({
+        format: "xfinder-configuration-probe-v1",
+        environment: "staging",
+        atUTC: new Date(now).toISOString(),
+      }),
+    ),
+  );
+  check(bytes.length < 4096, "configuration_probe_size_limit");
+  const object = "staging/diagnostics/configuration/" + randomUUID() + ".age";
+  const file = await phaseCall(
+    "configuration_probe_upload",
+    () => b2.put(object, bytes, { until, slot: 0 }),
+  );
+  const recovered = await phaseCall(
+    "configuration_probe_readback",
+    () => readConfigurationDestination(() => b2.read(object, 4096)),
+  );
+  check(
+    Buffer.from(recovered).equals(Buffer.from(bytes)),
+    "configuration_probe_readback_failed",
+  );
+  const after = await phaseCall(
+    "configuration_probe_retention",
+    () => readConfigurationDestination(() => b2.inventory()),
+  );
+  check(
+    after.files.get(object)?.mode === "compliance" &&
+      after.files.get(object).until >= now + 30 * DAY,
+    "configuration_probe_retention_failed",
+  );
+  return {
+    status: "configuration_destination_probe_passed",
+    environment: "staging",
+    bytes: file.size,
+    healthChanged: false,
+    sourceApisContacted: false,
+  };
+}
 export async function readConfigurationDestination(
   operation,
   pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
@@ -101,16 +156,26 @@ export async function backupConfiguration(
       encrypted.length <= CONFIGURATION_LIMIT + 4096,
       "configuration_ciphertext_limit",
     );
-    const file = await b2.put(object, encrypted, { until, slot: 0 });
+    const file = await phaseCall(
+      "configuration_upload",
+      () => b2.put(object, encrypted, { until, slot: 0 }),
+    );
     check(file.size === encrypted.length, "configuration_upload_size_mismatch");
-    const readback = await readConfigurationDestination(() =>
-      b2.read(object, CONFIGURATION_LIMIT + 4096)
+    const readback = await phaseCall(
+      "configuration_readback",
+      () =>
+        readConfigurationDestination(() =>
+          b2.read(object, CONFIGURATION_LIMIT + 4096)
+        ),
     );
     check(
       Buffer.from(readback).equals(Buffer.from(encrypted)),
       "configuration_ciphertext_readback_failed",
     );
-    const verified = await readConfigurationDestination(() => b2.inventory()),
+    const verified = await phaseCall(
+        "configuration_retention",
+        () => readConfigurationDestination(() => b2.inventory()),
+      ),
       stored = verified.files.get(object);
     check(
       stored?.mode === "compliance" && stored.until >= minimum &&
@@ -129,11 +194,12 @@ export async function backupConfiguration(
       ...summary,
     };
     check(verified.bytes + 4096 <= 9e9, "free_configuration_capacity_limit");
-    await b2.put(
-      "staging/health/configuration-success.json",
-      Buffer.from(JSON.stringify(health)),
-      { until, slot: 0 },
-    );
+    await phaseCall("configuration_publish_health", () =>
+      b2.put(
+        "staging/health/configuration-success.json",
+        Buffer.from(JSON.stringify(health)),
+        { until, slot: 0 },
+      ));
     return {
       status: "configuration_snapshot_committed",
       environment: "staging",

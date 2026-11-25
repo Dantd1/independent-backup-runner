@@ -8,8 +8,49 @@ import {
 } from "../configuration.mjs";
 import {
   backupConfiguration,
+  probeConfigurationDestination,
   readConfigurationDestination,
 } from "../configuration-backup.mjs";
+test("destination-only probe is small, encrypted and never changes success health", async () => {
+  const files = new Map(), values = new Map();
+  const b2 = {
+    inventory: async () => ({ bytes: 1000, files }),
+    put: async (name, bytes, { until }) => {
+      values.set(name, bytes);
+      files.set(name, { mode: "compliance", until });
+      return { id: "synthetic", size: bytes.length };
+    },
+    read: async (name) => values.get(name),
+  };
+  const proof = await probeConfigurationDestination({
+    b2,
+    encrypter: {
+      encrypt: async (b) =>
+        Buffer.concat([Buffer.from("synthetic-encrypted:"), b]),
+    },
+  });
+  assert.equal(proof.status, "configuration_destination_probe_passed");
+  assert.equal(proof.healthChanged, false);
+  assert.equal(proof.sourceApisContacted, false);
+  assert.equal(values.size, 1);
+  assert.ok(
+    [...values.keys()][0].startsWith("staging/diagnostics/configuration/"),
+  );
+  await assert.rejects(
+    probeConfigurationDestination({
+      b2: {
+        ...b2,
+        put: async () => {
+          throw Object.assign(Error("unavailable"), {
+            safeCode: "provider_http_503",
+          });
+        },
+      },
+      encrypter: { encrypt: async (b) => b },
+    }),
+    (e) => e.safePhase === "configuration_probe_upload",
+  );
+});
 test("configuration destination reads retry transient failures only and remain bounded", async () => {
   let attempts = 0;
   assert.equal(

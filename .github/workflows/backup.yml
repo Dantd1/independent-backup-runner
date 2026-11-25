@@ -20,6 +20,10 @@ on:
         description: "One-time configuration commissioning within the protected expiry window"
         type: boolean
         default: false
+      configuration_probe:
+        description: "Small encrypted destination-only probe without source capture or health update"
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -102,6 +106,7 @@ jobs:
           BACKUP_ZERO_COST_VERIFIED: ${{ vars.BACKUP_ZERO_COST_VERIFIED }}
           CONFIGURATION_BACKUP_ENABLED: "true"
           CONFIGURATION_COMMISSION_UNTIL: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'configuration-backup' && inputs.commission_configuration == true && vars.CONFIGURATION_COMMISSION_UNTIL || '' }}
+          CONFIGURATION_ACTION: ${{ inputs.configuration_probe == true && 'configuration-destination-probe' || 'configuration-backup' }}
           CONFIGURATION_SCOPE_JSON: ${{ secrets.CONFIGURATION_SCOPE_JSON }}
           CONFIGURATION_SUPABASE_TOKEN: ${{ secrets.CONFIGURATION_SUPABASE_TOKEN }}
           CONFIGURATION_CLOUDFLARE_TOKEN: ${{ secrets.CONFIGURATION_CLOUDFLARE_TOKEN }}
@@ -115,4 +120,4 @@ jobs:
           B2_WRITE_KEY_ID: ${{ secrets.B2_WRITE_KEY_ID }}
           B2_WRITE_KEY: ${{ secrets.B2_WRITE_KEY }}
           AGE_RECIPIENT: ${{ secrets.AGE_RECIPIENT }}
-        run: node run.mjs configuration-backup
+        run: node run.mjs "$CONFIGURATION_ACTION"
