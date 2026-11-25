@@ -6,7 +6,37 @@ import {
   validateConfigurationPackage,
   validateConfigurationScope,
 } from "../configuration.mjs";
-import { backupConfiguration } from "../configuration-backup.mjs";
+import {
+  backupConfiguration,
+  readConfigurationDestination,
+} from "../configuration-backup.mjs";
+test("configuration destination reads retry transient failures only and remain bounded", async () => {
+  let attempts = 0;
+  assert.equal(
+    await readConfigurationDestination(async () => {
+      if (++attempts < 3) {
+        throw Object.assign(Error("transient"), {
+          safeCode: "provider_http_503",
+        });
+      }
+      return "passed";
+    }, async () => {}),
+    "passed",
+  );
+  assert.equal(attempts, 3);
+  attempts = 0;
+  await assert.rejects(readConfigurationDestination(async () => {
+    attempts++;
+    throw Object.assign(Error("denied"), { safeCode: "provider_http_403" });
+  }, async () => {}));
+  assert.equal(attempts, 1);
+  attempts = 0;
+  await assert.rejects(readConfigurationDestination(async () => {
+    attempts++;
+    throw Object.assign(Error("transient"), { safeCode: "provider_http_503" });
+  }, async () => {}));
+  assert.equal(attempts, 3);
+});
 const uuid = (n) =>
   String(n).repeat(8) + "-" + String(n).repeat(4) + "-4" + String(n).repeat(3) +
   "-8" + String(n).repeat(3) + "-" + String(n).repeat(12);
@@ -180,6 +210,14 @@ test("capture is bounded GET-only, removes secret bindings, preserves policy sem
   );
 });
 test("capture refuses a widened Access destination or production worker marker", async () => {
+  await assert.rejects(
+    fixture((r, u) =>
+      u.pathname.endsWith("/policies")
+        ? [{ ...r[0], client_secret: "opaque" }]
+        : r
+    ).source.capture(),
+    /configuration_policy_filter_denied/,
+  );
   for (
     const mutate of [
       (r, u) =>

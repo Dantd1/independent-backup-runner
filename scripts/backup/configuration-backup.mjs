@@ -9,6 +9,26 @@ const DAY = 86400000;
 const check = (ok, code) => {
   if (!ok) throw Object.assign(Error(code), { safeCode: code });
 };
+export async function readConfigurationDestination(
+  operation,
+  pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      return await operation();
+    } catch (error) {
+      const retry = [
+        "provider_http_500",
+        "provider_http_502",
+        "provider_http_503",
+        "provider_http_504",
+      ].includes(error.safeCode) ||
+        ["AbortError", "TimeoutError", "TypeError"].includes(error.name);
+      if (!retry || attempt === 2) throw error;
+      await pause(500 * (attempt + 1));
+    }
+  }
+}
 export async function backupConfiguration(
   { source, b2, encrypter, now = Date.now(), commissioningUntil },
 ) {
@@ -22,7 +42,9 @@ export async function backupConfiguration(
   try {
     previous = JSON.parse(
       Buffer.from(
-        await b2.read("staging/health/configuration-success.json", 4096),
+        await readConfigurationDestination(() =>
+          b2.read("staging/health/configuration-success.json", 4096)
+        ),
       ).toString(),
     );
   } catch (error) {
@@ -52,7 +74,7 @@ export async function backupConfiguration(
       };
     }
   }
-  const inventory = await b2.inventory();
+  const inventory = await readConfigurationDestination(() => b2.inventory());
   check(
     Number.isSafeInteger(inventory.bytes) && inventory.bytes >= 0 &&
       inventory.bytes + CONFIGURATION_LIMIT + 8192 <= 9e9,
@@ -81,12 +103,15 @@ export async function backupConfiguration(
     );
     const file = await b2.put(object, encrypted, { until, slot: 0 });
     check(file.size === encrypted.length, "configuration_upload_size_mismatch");
-    const readback = await b2.read(object, CONFIGURATION_LIMIT + 4096);
+    const readback = await readConfigurationDestination(() =>
+      b2.read(object, CONFIGURATION_LIMIT + 4096)
+    );
     check(
       Buffer.from(readback).equals(Buffer.from(encrypted)),
       "configuration_ciphertext_readback_failed",
     );
-    const verified = await b2.inventory(), stored = verified.files.get(object);
+    const verified = await readConfigurationDestination(() => b2.inventory()),
+      stored = verified.files.get(object);
     check(
       stored?.mode === "compliance" && stored.until >= minimum &&
         verified.bytes <= 9e9,

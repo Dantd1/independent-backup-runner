@@ -164,7 +164,14 @@ export function connectConfigurationSource(
           (!j.result_info?.total_pages || j.result_info.total_pages <= 1),
         "configuration_pagination_required",
       );
-      return sanitizeConfiguration(j.result);
+      const sanitized = sanitizeConfiguration(j.result);
+      if (suffix.endsWith("/policies")) {
+        check(
+          JSON.stringify(sanitized) === JSON.stringify(j.result),
+          "configuration_policy_filter_denied",
+        );
+      }
+      return sanitized;
     } finally {
       bytes.fill(0);
     }
