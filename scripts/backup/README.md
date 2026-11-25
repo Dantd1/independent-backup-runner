@@ -80,6 +80,13 @@ Synthetic tests cover redaction without widening policies, staging-only scope,
 GET-only transport, missing recovery material, retention/readback/capacity and the
 twelve-hour skip. Logs must contain only aggregate status/error codes.
 
+Capture policy v2 preserves password/security-policy settings while removing
+credential material. Capture age starts at the first source read. A commissioning
+repeat requires an explicit manual boolean plus a protected expiry window of at
+most one hour; ordinary scheduled dispatches cannot use this override. Remove
+the commissioning variable before enabling recurrence. Earlier commissioning
+snapshots remain immutable history and must not be mistaken for v2 coverage.
+
 Optional database capture uses `DATABASE_BACKUP_ENABLED=true` only after its
 dedicated reader, `DATABASE_READER_URL`, trusted public `DATABASE_SSL_CA`,
 encrypted credential escrow and independent database-age monitoring have been

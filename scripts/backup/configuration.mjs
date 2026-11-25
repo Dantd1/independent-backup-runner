@@ -1,12 +1,12 @@
 import { Buffer } from "node:buffer";
 
-export const CONFIGURATION_FORMAT = "xfinder-platform-configuration-v1";
+export const CONFIGURATION_FORMAT = "xfinder-platform-configuration-v2";
 export const CONFIGURATION_LIMIT = 512 * 1024;
 const check = (ok, code) => {
   if (!ok) throw Object.assign(Error(code), { safeCode: code });
 };
 const sensitive =
-  /secret|password|authorization|fingerprint|private[_-]?(?:key|jwk)|^(?:token|access_token|refresh_token|id_token|api_key|applicationKey|application_key|signing_keys|smtp_pass)$/i;
+  /(?:^|_)(?:secrets?|password|passwd|pass|authorization|fingerprint|private_key|private_jwk|access_token|refresh_token|id_token|api_key|application_key|signing_keys|password_hash)$|^(?:token|clientSecret|applicationKey|apiKey|privateKey|privateJwk|jwtSecret|accessToken|refreshToken)$/i;
 const secretValue =
   /(?:sb_secret_|sbp_|GOCSPX-|AGE-SECRET-KEY-|-----BEGIN .*PRIVATE KEY)/;
 export function sanitizeConfiguration(value) {
@@ -173,6 +173,7 @@ export function connectConfigurationSource(
     scope,
     async capture() {
       requests = 0;
+      const captureStartedAt = new Date().toISOString();
       const account = `accounts/${scope.accountId}`;
       const supabase = {};
       for (
@@ -273,7 +274,8 @@ export function connectConfigurationSource(
         environment: "staging",
         projectRef: scope.projectRef,
         accountId: scope.accountId,
-        capturedAt: new Date().toISOString(),
+        capturedAt: captureStartedAt,
+        sourceReadsCompletedAt: new Date().toISOString(),
         supabase,
         apps,
         identityProviders,

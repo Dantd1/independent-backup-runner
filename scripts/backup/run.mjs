@@ -42,6 +42,7 @@ try {
         source: providers.configuration,
         b2: providers.b2,
         encrypter: cipher,
+        commissioningUntil: process.env.CONFIGURATION_COMMISSION_UNTIL,
       })
       : process.argv[2] === "database-probe"
       ? await providers.database.probe()

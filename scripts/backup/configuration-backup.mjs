@@ -10,7 +10,7 @@ const check = (ok, code) => {
   if (!ok) throw Object.assign(Error(code), { safeCode: code });
 };
 export async function backupConfiguration(
-  { source, b2, encrypter, now = Date.now() },
+  { source, b2, encrypter, now = Date.now(), commissioningUntil },
 ) {
   check(source && b2 && encrypter, "configuration_backup_not_enabled");
   check(
@@ -41,7 +41,10 @@ export async function backupConfiguration(
         captured <= completed && completed <= now + 300000,
       "configuration_cadence_marker_invalid",
     );
-    if (now - captured < 12 * 3600000) {
+    const commissionTime = Date.parse(commissioningUntil ?? "");
+    const commissioning = Number.isFinite(commissionTime) &&
+      commissionTime > now && commissionTime <= now + 3600000;
+    if (now - captured < 12 * 3600000 && !commissioning) {
       return {
         status: "configuration_snapshot_fresh",
         environment: "staging",
@@ -97,6 +100,7 @@ export async function backupConfiguration(
       completedAt,
       bytes: file.size,
       readersExpireAt: source.scope.readersExpireAt,
+      capturePolicyVersion: 2,
       ...summary,
     };
     check(verified.bytes + 4096 <= 9e9, "free_configuration_capacity_limit");

@@ -121,13 +121,21 @@ function fixture(modify = (x) => x) {
 }
 test("sanitizer removes credentials at every depth while preserving Access service-token selectors", () => {
   const input = {
-    nested: { client_secret: "hidden", password: "hidden" },
+    nested: {
+      client_secret: "hidden",
+      password: "hidden",
+      password_min_length: 12,
+      password_required_characters: "lower_upper_letters_digits_symbols",
+    },
     include: [{ service_token: { token_id: uuid(1) } }],
     binding: { name: "X", type: "secret_text", text: "opaque" },
   };
   const result = sanitizeConfiguration(input);
   assert.deepEqual(result.include, input.include);
-  assert.deepEqual(result.nested, {});
+  assert.deepEqual(result.nested, {
+    password_min_length: 12,
+    password_required_characters: "lower_upper_letters_digits_symbols",
+  });
   assert.equal("text" in result.binding, false);
   assert.equal(result.binding.valueAvailable, false);
   assert.throws(() =>
@@ -229,6 +237,27 @@ test("configuration commit requires escrow, capacity, readback and retention bef
   assert.equal(
     (await backupConfiguration({ source: f.source, b2, encrypter: {} })).status,
     "configuration_snapshot_fresh",
+  );
+  assert.equal(
+    (await backupConfiguration({
+      source: f.source,
+      b2,
+      encrypter: {},
+      commissioningUntil: new Date(Date.now() + 2 * 3600000).toISOString(),
+    })).status,
+    "configuration_snapshot_fresh",
+  );
+  assert.equal(
+    (await backupConfiguration({
+      source: f.source,
+      b2,
+      encrypter: {
+        encrypt: async (clear) =>
+          Buffer.concat([Buffer.from("encrypted-fixture:"), clear]),
+      },
+      commissioningUntil: new Date(Date.now() + 1800000).toISOString(),
+    })).status,
+    "configuration_snapshot_committed",
   );
   values.delete("staging/health/configuration-success.json");
   const blocked = { ...b2, inventory: async () => ({ bytes: 9e9, files }) };

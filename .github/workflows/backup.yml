@@ -16,6 +16,10 @@ on:
         type: choice
         options: [selftest, cadence-check, scheduled-backup, inventory, database-probe, backup, backup-packed, configuration-backup]
         default: selftest
+      commission_configuration:
+        description: "One-time configuration commissioning within the protected expiry window"
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -97,6 +101,7 @@ jobs:
           XFINDER_ENVIRONMENT: staging
           BACKUP_ZERO_COST_VERIFIED: ${{ vars.BACKUP_ZERO_COST_VERIFIED }}
           CONFIGURATION_BACKUP_ENABLED: "true"
+          CONFIGURATION_COMMISSION_UNTIL: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'configuration-backup' && inputs.commission_configuration == true && vars.CONFIGURATION_COMMISSION_UNTIL || '' }}
           CONFIGURATION_SCOPE_JSON: ${{ secrets.CONFIGURATION_SCOPE_JSON }}
           CONFIGURATION_SUPABASE_TOKEN: ${{ secrets.CONFIGURATION_SUPABASE_TOKEN }}
           CONFIGURATION_CLOUDFLARE_TOKEN: ${{ secrets.CONFIGURATION_CLOUDFLARE_TOKEN }}
