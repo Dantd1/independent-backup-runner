@@ -55,6 +55,7 @@ jobs:
           XFINDER_ENVIRONMENT: staging
           BACKUP_TRIGGER_CRON: ${{ github.event.schedule }}
           BACKUP_ZERO_COST_VERIFIED: ${{ vars.BACKUP_ZERO_COST_VERIFIED }}
+          BACKUP_ADAPTERS_VERSION: ${{ vars.BACKUP_ADAPTERS_VERSION }}
           DATABASE_BACKUP_ENABLED: ${{ vars.DATABASE_BACKUP_ENABLED == 'true' && ((github.event_name != 'schedule' && inputs.mode != 'scheduled-backup') || vars.DATABASE_BACKUP_SCHEDULE_ENABLED == 'true') && 'true' || 'false' }}
           DATABASE_READER_URL: ${{ secrets.DATABASE_READER_URL }}
           DATABASE_SSL_CA: ${{ secrets.DATABASE_SSL_CA }}
@@ -81,6 +82,7 @@ jobs:
           XFINDER_ENVIRONMENT: staging
           BACKUP_TRIGGER_CRON: ${{ github.event.schedule }}
           BACKUP_ZERO_COST_VERIFIED: ${{ vars.BACKUP_ZERO_COST_VERIFIED }}
+          BACKUP_ADAPTERS_VERSION: ${{ vars.BACKUP_ADAPTERS_VERSION }}
           DATABASE_BACKUP_ENABLED: ${{ vars.DATABASE_BACKUP_ENABLED == 'true' && ((github.event_name != 'schedule' && inputs.mode != 'scheduled-backup') || vars.DATABASE_BACKUP_SCHEDULE_ENABLED == 'true') && 'true' || 'false' }}
           DATABASE_READER_URL: ${{ secrets.DATABASE_READER_URL }}
           DATABASE_SSL_CA: ${{ secrets.DATABASE_SSL_CA }}
@@ -104,6 +106,7 @@ jobs:
         env:
           XFINDER_ENVIRONMENT: staging
           BACKUP_ZERO_COST_VERIFIED: ${{ vars.BACKUP_ZERO_COST_VERIFIED }}
+          BACKUP_ADAPTERS_VERSION: ${{ vars.BACKUP_ADAPTERS_VERSION }}
           CONFIGURATION_BACKUP_ENABLED: "true"
           CONFIGURATION_COMMISSION_UNTIL: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'configuration-backup' && inputs.commission_configuration == true && vars.CONFIGURATION_COMMISSION_UNTIL || '' }}
           CONFIGURATION_ACTION: ${{ inputs.configuration_probe == true && 'configuration-destination-probe' || 'configuration-backup' }}

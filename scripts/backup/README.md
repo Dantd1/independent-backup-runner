@@ -1,5 +1,35 @@
 # Independent encrypted backup runner
 
+## Reversible recurrent adapter gate
+
+`BACKUP_ADAPTERS_VERSION=isolated-v1` installs bounded staging provider adapters
+around the existing HMAC, native PostgreSQL and restricted B2 transports. It
+preserves the complete catalog, encrypted database context, v1 manifests,
+incremental recovery packs, 30-day retention and the twelve-hour cadence guard.
+The representative candidate test archive is rejected as a recurrent write or
+health source. This integration does not install the candidate batch archive
+format, change provider endpoints or publish live allowlist identifiers.
+
+Per-run ceilings: 128 MiB ciphertext uploads (forecast checked before writes),
+64 MiB B2 body reads, 32 MiB compressed database dump, 2 GiB source bodies,
+40,000 source reads, 1,800 destination read/write reservations each (an inventory
+reserves 120 reads for its bounded pagination/auth). These are conservative
+adapter-operation reservations, not claims of authoritative daily B2 billing
+counts. Provider zero-cost caps remain the final account-wide boundary; check
+the current allowance before commissioning. Source bodies must match catalog
+size/ETag; a mismatch or quota failure cannot publish success. Incomplete writes
+remain encrypted and do not replace the previous health marker.
+
+The success health keeps its v1 schema and adds the nonsecret adapter version
+and `fileCoverage=complete_catalog`. The existing independent monitor can
+recognize it by the completion/database timestamps without new access or a
+Worker deployment. Recognition does not certify restore or RPO/RTO.
+
+Rollback: unset `BACKUP_ADAPTERS_VERSION`; preserve all other gates, secrets,
+health and recovery packs. Do not disable packed mode or delete archives. A
+manual commissioning copy is distinct from the subsequent automatic twelve-hour
+cadence; it establishes the next due time through the unchanged health guard.
+
 Portable Node 22 package for staging-only Supabase Storage, Cloudflare R2/KV and
 private Backblaze B2. No Windows, DPAPI, browser session, provider master key,
 or recovery private key is required. Live access configuration and credentials

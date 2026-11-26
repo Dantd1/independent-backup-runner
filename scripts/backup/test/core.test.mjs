@@ -4,6 +4,7 @@ import { test } from "node:test";
 import { Buffer } from "node:buffer";
 import assert from "node:assert/strict";
 import * as age from "age-encryption";
+import { createRecurringAdapters } from "../recurring-adapters.mjs";
 import {
   assertDatabaseWriteScope,
   captureDatabase,
@@ -385,6 +386,159 @@ test("activation, staging scope, independent B2 roles and free-cap guards fail c
   assert.throws(() => sourcePath("../private"));
   assert.equal(sourcePath("folder/a & b.png"), "folder/a%20%26%20b.png");
 });
+test("recurring adapters preserve full legacy packs, database context, incremental reuse and monitor health", async () => {
+  const f = await fixture();
+  const now = Date.now();
+  const db = {
+    inspect: async () => {},
+    capture: async () => ({
+      dump: Buffer.from("PGDMPsynthetic-complete-database"),
+      context: {
+        environment: "staging",
+        projectRef: scope.projectRef,
+        capturedAt: new Date(now).toISOString(),
+        counts: [{ schema: "public", name: "fixture", rows: "2" }],
+        roles: [{ rolname: "synthetic", rolsuper: false }],
+      },
+    }),
+  };
+  const adapted = () =>
+    createRecurringAdapters({ ...f, database: db, close: async () => {} }, {
+      scope: { ...scope, environment: "staging" },
+      adaptersVersion: "isolated-v1",
+    });
+  const one = adapted();
+  const result = await snapshot({ ...f, ...one, now, recoveryPacks: true });
+  const decrypt = new age.Decrypter();
+  decrypt.addIdentity(f.identity);
+  const manifest = JSON.parse(
+    await decrypt.decrypt(f.payloads.get(result.manifest), "text"),
+  );
+  assert.equal(manifest.format, "xfinder-age-backup-v1");
+  assert.equal(manifest.adapterVersion, "isolated-v1");
+  assert.equal(manifest.records.length, 3);
+  assert.ok(manifest.database);
+  assert.equal(manifest.recoveryPacks.flatMap((p) => p.parts).length, 3);
+  for (const p of manifest.recoveryPacks) {
+    const bytes = await decrypt.decrypt(f.payloads.get(p.object));
+    assert.ok(bytes.length > 0);
+  }
+  const health = JSON.parse(f.payloads.get("staging/health/success.json"));
+  assert.equal(health.adapterVersion, "isolated-v1");
+  assert.equal(health.fileCoverage, "complete_catalog");
+  assert.equal(health.records, 3);
+  assert.equal(health.databaseCapturedAt, new Date(now).toISOString());
+  assert.equal(
+    (await checkBackupCadence(
+      one.b2,
+      Date.parse(health.completedAt) + 3600000,
+      true,
+    )).due,
+    false,
+  );
+  await one.close();
+  await assert.rejects(one.storage.list(), /recurring_adapter_closed/);
+  const storagePack =
+    manifest.recoveryPacks.find((p) =>
+      p.parts.some((part) => manifest.records[part.index].kind === "storage")
+    ).object;
+  const before = f.writes.filter((x) => x === storagePack).length;
+  assert.equal(before, 1);
+  const two = adapted();
+  await snapshot({
+    ...f,
+    ...two,
+    now: now + 12 * 3600000,
+    recoveryPacks: true,
+  });
+  assert.equal(f.writes.filter((x) => x === storagePack).length, before);
+  assert.ok(two.usage().sourceReads < one.usage().sourceReads);
+  await two.close();
+});
+
+test("recurring adapter scope, forecast and invalid source versions cannot publish health", async () => {
+  const f = await fixture(),
+    config = {
+      scope: { ...scope, environment: "staging" },
+      adaptersVersion: "isolated-v1",
+    };
+  const raw = { ...f, close: async () => {} };
+  assert.throws(
+    () =>
+      createRecurringAdapters(raw, {
+        ...config,
+        scope: { ...scope, environment: "production" },
+      }),
+    /scope_rejected/,
+  );
+  const tiny = createRecurringAdapters(raw, config, {
+    limits: { uploadBytes: 1 },
+  });
+  await assert.rejects(
+    snapshot({ ...f, ...tiny, recoveryPacks: true }),
+    /recurring_upload_forecast_limit/,
+  );
+  assert.equal(f.writes.length, 0);
+  const adapted = createRecurringAdapters(raw, config);
+  await assert.rejects(
+    adapted.b2.put(
+      "staging/candidate-integrated-v1/fake/manifest.age",
+      Buffer.from("x"),
+      {},
+    ),
+    /scope_rejected/,
+  );
+  await assert.rejects(
+    adapted.b2.put("production/health/success.json", Buffer.from("x"), {}),
+    /scope_rejected/,
+  );
+  raw.r2 = {
+    ...f.r2,
+    read: async () => ({
+      bytes: Buffer.from("synthetic site"),
+      etag: "changed",
+    }),
+  };
+  await assert.rejects(
+    snapshot({ ...f, ...adapted, recoveryPacks: true }),
+    /recurring_source_version_changed/,
+  );
+  assert.equal(f.writes.includes("staging/health/success.json"), false);
+});
+
+test("recurring adapter resource ceilings are reserved before concurrent operations", async () => {
+  const f = await fixture(),
+    config = {
+      scope: { ...scope, environment: "staging" },
+      adaptersVersion: "isolated-v1",
+    };
+  const adapted = createRecurringAdapters(
+    { ...f, close: async () => {} },
+    config,
+    { limits: { sourceReads: 1 } },
+  );
+  const item = (await adapted.storage.list()).objects[0];
+  const results = await Promise.allSettled([
+    adapted.storage.read(item),
+    adapted.storage.read(item),
+  ]);
+  assert.equal(results.filter((r) => r.status === "fulfilled").length, 1);
+  assert.match(
+    results.find((r) => r.status === "rejected").reason.message,
+    /source_reads_limit/,
+  );
+  const env = environment();
+  assert.equal(
+    configFromEnv({ ...env, BACKUP_ADAPTERS_VERSION: "isolated-v1" })
+      .adaptersVersion,
+    "isolated-v1",
+  );
+  assert.throws(
+    () => configFromEnv({ ...env, BACKUP_ADAPTERS_VERSION: "unknown" }),
+    /unsupported_recurring_adapters/,
+  );
+});
+
 test("S3 XML handles encoded filenames, empty pages and opaque cursors; rejects DTDs", () => {
   const xml =
     "<ListBucketResult><Contents><Key>a&amp;b/&#xE7;.png</Key><Size>4</Size><ETag>&quot;opaque&quot;</ETag><LastModified>2026-01-01T00:00:00Z</LastModified></Contents><IsTruncated>true</IsTruncated><NextContinuationToken>a&amp;b=</NextContinuationToken></ListBucketResult>";

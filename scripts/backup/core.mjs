@@ -298,6 +298,12 @@ export function configFromEnv(env) {
   );
   sourcePath(scope.recoveryObject);
   config.scope = scope;
+  requireSafe(
+    !env.BACKUP_ADAPTERS_VERSION ||
+      env.BACKUP_ADAPTERS_VERSION === "isolated-v1",
+    "unsupported_recurring_adapters",
+  );
+  config.adaptersVersion = env.BACKUP_ADAPTERS_VERSION || undefined;
   const sites = new URL(scope.sitesExportUrl);
   requireSafe(
     sites.protocol === "https:" && !sites.username && !sites.password &&
@@ -485,10 +491,20 @@ export async function snapshot(
     mode = "backup",
     recoveryPacks = false,
     database,
+    adapterVersion,
+    preflight: adapterPreflight,
     log = () => {},
   },
 ) {
   requireSafe(["inventory", "backup"].includes(mode), "invalid_mode");
+  requireSafe(
+    !adapterVersion || adapterVersion === "isolated-v1",
+    "unsupported_recurring_adapters",
+  );
+  requireSafe(
+    !adapterVersion || recoveryPacks === true,
+    "recurring_complete_packs_required",
+  );
   const runId = new Date(now).toISOString().replace(/[:.]/g, "-") + "-" +
     randomUUID();
   const retainUntil = now + 31 * DAY, minimumUntil = now + 30 * DAY;
@@ -562,6 +578,7 @@ export async function snapshot(
       return n + size + 2048;
     }, 0) + 16 * 1024 * 1024 + (database ? 80 * 1024 * 1024 : 0);
   requireSpace(used, estimate);
+  adapterPreflight?.({ projectedAdditionalBytes: estimate });
   for (const bucket of catalog.buckets.filter((b) => !b.public)) {
     const item = catalog.objects.find((i) => i.bucket === bucket.id);
     if (item) {
@@ -891,6 +908,7 @@ export async function snapshot(
   const completedAt = new Date().toISOString();
   const manifest = {
     format: "xfinder-age-backup-v1",
+    ...(adapterVersion ? { adapterVersion } : {}),
     environment: "staging",
     runId,
     startedAt: new Date(now).toISOString(),
@@ -966,6 +984,9 @@ export async function snapshot(
   used = verified.bytes;
   const health = {
     format: "xfinder-backup-health-v1",
+    ...(adapterVersion
+      ? { adapterVersion, fileCoverage: "complete_catalog" }
+      : {}),
     environment: "staging",
     completedAt,
     records: records.length,

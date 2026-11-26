@@ -10,6 +10,7 @@ import {
   snapshot,
 } from "./core.mjs";
 import { connectProviders } from "./providers.mjs";
+import { createRecurringAdapters } from "./recurring-adapters.mjs";
 import {
   backupConfiguration,
   probeConfigurationDestination,
@@ -25,6 +26,9 @@ try {
   }));
   const config = configFromEnv(process.env);
   providers = await connectProviders(config);
+  if (config.adaptersVersion) {
+    providers = createRecurringAdapters(providers, config);
+  }
   if (process.argv[2] === "schedule-check") {
     const decision = await checkBackupCadence(
       providers.b2,
@@ -87,6 +91,9 @@ try {
         environment: "staging",
         capacityWarning: result.capacityWarning ?? false,
         paidUsageAuthorized: false,
+        ...(providers.adapterVersion
+          ? { adapterVersion: providers.adapterVersion }
+          : {}),
       }),
     );
   }
