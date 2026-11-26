@@ -10,7 +10,10 @@ import {
   snapshot,
 } from "./core.mjs";
 import { connectProviders } from "./providers.mjs";
-import { createRecurringAdapters } from "./recurring-adapters.mjs";
+import {
+  createRecurringAdapters,
+  recurringUsageTelemetry,
+} from "./recurring-adapters.mjs";
 import {
   backupConfiguration,
   probeConfigurationDestination,
@@ -128,5 +131,17 @@ try {
   );
   process.exitCode = 1;
 } finally {
+  // Telemetry must never turn an accepted copy into a failed backup.
+  try {
+    const usage = recurringUsageTelemetry(providers);
+    if (usage) console.log(JSON.stringify(usage));
+  } catch {
+    console.warn(
+      JSON.stringify({
+        telemetry: "adapter_usage_unavailable",
+        environment: "staging",
+      }),
+    );
+  }
   if (providers) await providers.close().catch(() => {});
 }

@@ -4,7 +4,10 @@ import { test } from "node:test";
 import { Buffer } from "node:buffer";
 import assert from "node:assert/strict";
 import * as age from "age-encryption";
-import { createRecurringAdapters } from "../recurring-adapters.mjs";
+import {
+  createRecurringAdapters,
+  recurringUsageTelemetry,
+} from "../recurring-adapters.mjs";
 import {
   assertDatabaseWriteScope,
   captureDatabase,
@@ -429,6 +432,10 @@ test("recurring adapters preserve full legacy packs, database context, increment
   assert.equal(health.records, 3);
   assert.equal(health.databaseCapturedAt, new Date(now).toISOString());
   assert.equal(
+    recurringUsageTelemetry(one).databaseDumpBytes,
+    Buffer.byteLength("PGDMPsynthetic-complete-database"),
+  );
+  assert.equal(
     (await checkBackupCadence(
       one.b2,
       Date.parse(health.completedAt) + 3600000,
@@ -454,6 +461,40 @@ test("recurring adapters preserve full legacy packs, database context, increment
   assert.equal(f.writes.filter((x) => x === storagePack).length, before);
   assert.ok(two.usage().sourceReads < one.usage().sourceReads);
   await two.close();
+});
+
+test("recurring usage telemetry publishes only safe numeric reservations without affecting legacy providers", () => {
+  const counters = {
+    sourceBytes: 2,
+    sourceReads: 1,
+    uploadBytes: 3,
+    downloadBytes: 4,
+    destinationReads: 120,
+    destinationWrites: 2,
+    databaseDumpBytes: 5,
+    secret: "synthetic-secret",
+    object: "private-path",
+    token: "synthetic-token",
+  };
+  const providers = { adapterVersion: "isolated-v1", usage: () => counters };
+  const report = recurringUsageTelemetry(providers);
+  assert.equal(report.accounting, "local_conservative_reservations");
+  assert.equal(report.databaseDumpBytes, 5);
+  assert.equal(JSON.stringify(report).includes("synthetic-secret"), false);
+  assert.equal(JSON.stringify(report).includes("private-path"), false);
+  assert.equal(Object.hasOwn(report, "token"), false);
+  assert.equal(recurringUsageTelemetry(undefined), undefined);
+  assert.equal(recurringUsageTelemetry({}), undefined);
+  for (const bad of [-1, NaN, Infinity, "5", Number.MAX_SAFE_INTEGER + 1]) {
+    assert.throws(
+      () =>
+        recurringUsageTelemetry({
+          ...providers,
+          usage: () => ({ ...counters, downloadBytes: bad }),
+        }),
+      /recurring_telemetry_counter_rejected/,
+    );
+  }
 });
 
 test("recurring adapter scope, forecast and invalid source versions cannot publish health", async () => {

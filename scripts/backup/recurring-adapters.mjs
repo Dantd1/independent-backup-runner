@@ -1,6 +1,38 @@
 import { requireSafe, sourcePath } from "./core.mjs";
 
 export const RECURRING_ADAPTER_VERSION = "isolated-v1";
+// Publish only bounded operational counters. Reservations are conservative and
+// do not represent the B2 account bill or prove that a snapshot was committed.
+export function recurringUsageTelemetry(providers) {
+  if (providers?.adapterVersion !== RECURRING_ADAPTER_VERSION) return undefined;
+  const raw = providers.usage();
+  const counters = {};
+  for (
+    const key of [
+      "sourceBytes",
+      "sourceReads",
+      "uploadBytes",
+      "downloadBytes",
+      "destinationReads",
+      "destinationWrites",
+      "databaseDumpBytes",
+    ]
+  ) {
+    requireSafe(
+      Number.isSafeInteger(raw[key]) && raw[key] >= 0,
+      "recurring_telemetry_counter_rejected",
+    );
+    counters[key] = raw[key];
+  }
+  return {
+    telemetry: "backup_adapter_usage",
+    version: 1,
+    environment: "staging",
+    adapterVersion: RECURRING_ADAPTER_VERSION,
+    accounting: "local_conservative_reservations",
+    ...counters,
+  };
+}
 const MIB = 1024 * 1024;
 const etag = (value) =>
   String(value ?? "").replace(/^W\//, "").replace(/^"|"$/g, "");
@@ -49,6 +81,7 @@ export function createRecurringAdapters(raw, config, { limits = {} } = {}) {
     downloadBytes: 0,
     destinationReads: 0,
     destinationWrites: 0,
+    databaseDumpBytes: 0,
   };
   const active = () => requireSafe(!closed, "recurring_adapter_closed");
   function reserve(kind, amount) {
@@ -245,6 +278,7 @@ export function createRecurringAdapters(raw, config, { limits = {} } = {}) {
               Date.now() - time < 24 * 3600000,
             "recurring_database_time_rejected",
           );
+          usage.databaseDumpBytes = captured.dump.length;
           return captured;
         } catch (error) {
           captured?.dump?.fill(0);
