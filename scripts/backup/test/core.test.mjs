@@ -239,6 +239,12 @@ test("staging partition opt-in is independent of protected source secrets and re
   };
   assert.deepEqual(configFromEnv(next).scope.accountPartitions, policy);
   assert.equal(env.BACKUP_SCOPE_JSON, JSON.stringify(scope));
+  for (const invalid of ["null", "false", "[]", "{}"]) {
+    assert.throws(
+      () => configFromEnv({ ...next, BACKUP_ACCOUNT_PARTITIONS_JSON: invalid }),
+      /partition/,
+    );
+  }
   assert.throws(
     () =>
       configFromEnv({ ...next, BACKUP_ACCOUNT_PARTITIONS_JSON: "bad json" }),

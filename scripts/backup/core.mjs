@@ -307,6 +307,7 @@ export function configFromEnv(env) {
     } catch {
       requireSafe(false, "invalid_account_partition_configuration");
     }
+    storagePartitionCap(policy, scope.b2Name);
     requireSafe(
       !scope.accountPartitions ||
         JSON.stringify(scope.accountPartitions) === JSON.stringify(policy),
