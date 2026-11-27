@@ -620,6 +620,8 @@ export async function snapshot(
     mode,
     records: records.length,
     storedBytes: used,
+    storageCapBytes: capacityCap,
+    capacityWarning: used >= capacityCap * 8 / 9,
     projectedAdditionalBytes: estimate,
     paidUsageAuthorized: false,
   };
@@ -1012,7 +1014,7 @@ export async function snapshot(
     completedAt,
     records: records.length,
     storedBytes: used,
-    capacityWarning: used >= 8_000_000_000,
+    capacityWarning: used >= capacityCap * 8 / 9,
     ...(databaseCopy
       ? {
         databaseCapturedAt: databaseCopy.capturedAt,
@@ -1031,7 +1033,7 @@ export async function snapshot(
     completedAt,
     stats,
     storedBytes: used,
-    capacityWarning: used >= 8_000_000_000,
+    capacityWarning: used >= capacityCap * 8 / 9,
     fullServiceRecoveryVerified: false,
   };
 }

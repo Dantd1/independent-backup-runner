@@ -772,6 +772,24 @@ test("inventory performs no writes, retention changes or credential archive rewr
   assert.deepEqual(f.extensions, []);
 });
 
+test("capacity warning uses the environment ceiling instead of the whole account, without writing during inventory", async () => {
+  const f = await fixture(), inventory = f.b2.inventory;
+  f.b2.inventory = async () => ({
+    ...await inventory(),
+    bytes: 3600000000,
+    storageCapBytes: 4000000000,
+  });
+  const own = await snapshot({ ...f, mode: "inventory" });
+  assert.equal(own.storageCapBytes, 4000000000);
+  assert.equal(own.capacityWarning, true);
+  f.b2.inventory = async () => ({ ...await inventory(), bytes: 3600000000 });
+  const legacy = await snapshot({ ...f, mode: "inventory" });
+  assert.equal(legacy.storageCapBytes, 9000000000);
+  assert.equal(legacy.capacityWarning, false);
+  assert.deepEqual(f.writes, []);
+  assert.deepEqual(f.extensions, []);
+});
+
 test("R2 metadata survives encrypted manifests and metadata-only changes reuse the body", async () => {
   const f = await fixture(), decrypt = new age.Decrypter();
   decrypt.addIdentity(f.identity);
