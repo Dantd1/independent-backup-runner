@@ -1,5 +1,6 @@
 import { createHash, randomUUID, X509Certificate } from "node:crypto";
 import { Buffer } from "node:buffer";
+import { storagePartitionCap } from "./account-partitions.mjs";
 export const CAP = 9_000_000_000;
 export const DAY = 86400000;
 export const R2_METADATA_FORMAT = "xfinder-r2-metadata-v1";
@@ -193,10 +194,11 @@ export const digest = (value) =>
   createHash("sha256").update(value).digest("hex");
 export const normalizeEtag = (value) =>
   String(value).trim().replace(/^W\//, "").replace(/^"|"$/g, "");
-export function requireSpace(used, extra) {
+export function requireSpace(used, extra, cap = CAP) {
   requireSafe(
     Number.isSafeInteger(used) && Number.isSafeInteger(extra) && used >= 0 &&
-      extra >= 0 && used + extra <= CAP,
+      extra >= 0 && Number.isSafeInteger(cap) && cap > 0 && cap <= CAP &&
+      used + extra <= cap,
     "free_capacity_limit",
   );
 }
@@ -298,6 +300,23 @@ export function configFromEnv(env) {
   );
   sourcePath(scope.recoveryObject);
   config.scope = scope;
+  if (env.BACKUP_ACCOUNT_PARTITIONS_JSON) {
+    let policy;
+    try {
+      policy = JSON.parse(env.BACKUP_ACCOUNT_PARTITIONS_JSON);
+    } catch {
+      requireSafe(false, "invalid_account_partition_configuration");
+    }
+    requireSafe(
+      !scope.accountPartitions ||
+        JSON.stringify(scope.accountPartitions) === JSON.stringify(policy),
+      "conflicting_account_partition_configuration",
+    );
+    scope.accountPartitions = policy;
+  }
+  if (scope.accountPartitions) {
+    storagePartitionCap(scope.accountPartitions, scope.b2Name);
+  }
   requireSafe(
     !env.BACKUP_ADAPTERS_VERSION ||
       env.BACKUP_ADAPTERS_VERSION === "isolated-v1",
@@ -509,8 +528,9 @@ export async function snapshot(
     randomUUID();
   const retainUntil = now + 31 * DAY, minimumUntil = now + 30 * DAY;
   const existing = await b2.inventory();
+  const capacityCap = existing.storageCapBytes ?? CAP;
   let used = existing.bytes;
-  requireSpace(used, 0);
+  requireSpace(used, 0, capacityCap);
   const catalog = await storage.list(),
     cloud = (await r2.list()).map(normalizeR2RecordMetadata),
     keys = await kv.list();
@@ -577,7 +597,7 @@ export async function snapshot(
       );
       return n + size + 2048;
     }, 0) + 16 * 1024 * 1024 + (database ? 80 * 1024 * 1024 : 0);
-  requireSpace(used, estimate);
+  requireSpace(used, estimate, capacityCap);
   adapterPreflight?.({ projectedAdditionalBytes: estimate });
   for (const bucket of catalog.buckets.filter((b) => !b.public)) {
     const item = catalog.objects.find((i) => i.bucket === bucket.id);
@@ -618,7 +638,7 @@ export async function snapshot(
     }
   }
   async function upload(name, bytes, sourceDigest, slot) {
-    requireSpace(used, bytes.length);
+    requireSpace(used, bytes.length, capacityCap);
     used += bytes.length;
     const file = await b2.put(name, bytes, {
       until: retainUntil,
@@ -818,6 +838,7 @@ export async function snapshot(
         (sum, p) => sum + p.group.reduce((n, e) => n + e.bytes, 0) + 8192,
         0,
       ),
+      capacityCap,
     );
     let packIndex = 0;
     await Promise.all(Array.from({ length: 2 }, (_, slot) =>
@@ -963,7 +984,7 @@ export async function snapshot(
     0,
   );
   const verified = await b2.inventory();
-  requireSpace(verified.bytes, 0);
+  requireSpace(verified.bytes, 0, capacityCap);
   for (
     const name of [
       ...material,
@@ -1001,7 +1022,7 @@ export async function snapshot(
   };
   // This contains only operational counters/time, so an independent watchdog needs no recovery key.
   const healthBytes = Buffer.from(JSON.stringify(health));
-  requireSpace(used, healthBytes.length);
+  requireSpace(used, healthBytes.length, capacityCap);
   await upload("staging/health/success.json", healthBytes, undefined, 0);
   return {
     status: "snapshot_committed",
@@ -1030,7 +1051,7 @@ export async function recordAttempt(b2, conclusion, now = Date.now()) {
     }),
   );
   const existing = await b2.inventory();
-  requireSpace(existing.bytes, bytes.length);
+  requireSpace(existing.bytes, bytes.length, existing.storageCapBytes ?? CAP);
   await b2.put("staging/health/attempt.json", bytes, {
     until: now + 31 * DAY,
     slot: 0,

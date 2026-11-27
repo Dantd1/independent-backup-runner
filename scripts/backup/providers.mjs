@@ -7,6 +7,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { connectConfigurationSource } from "./configuration.mjs";
+import { storagePartitionCap } from "./account-partitions.mjs";
 import {
   b2Url,
   DATABASE_CATALOG_SQL,
@@ -675,6 +676,7 @@ export function connectProviders(
     );
   }
   const uploads = new Map();
+  let partitionStoredBytes, partitionProbe;
   const b2 = {
     keyIds: [
       c.B2_WRITE_KEY_ID,
@@ -704,10 +706,15 @@ export function connectProviders(
         const buckets = [...xml.matchAll(/<Name>([^<]+)<\/Name>/g)].map((m) =>
           m[1]
         );
-        requireSafe(
-          buckets.length === 1 && buckets[0] === B2_NAME,
-          "unaccounted_b2_bucket",
-        );
+        const storageCapBytes = c.scope.accountPartitions
+          ? storagePartitionCap(c.scope.accountPartitions, B2_NAME, buckets)
+          : undefined;
+        if (!storageCapBytes) {
+          requireSafe(
+            buckets.length === 1 && buckets[0] === B2_NAME,
+            "unaccounted_b2_bucket",
+          );
+        }
         const state = await native("read", "b2_list_buckets", {
           accountId: c.scope.b2Account,
           bucketId: B2_BUCKET,
@@ -741,7 +748,16 @@ export function connectProviders(
               }
             }
           }
-          if (!result.nextFileName) return { bytes, files };
+          if (!result.nextFileName) {
+            if (storageCapBytes) {
+              partitionStoredBytes = Math.max(partitionStoredBytes ?? 0, bytes);
+            }
+            return {
+              bytes,
+              files,
+              ...(storageCapBytes ? { storageCapBytes } : {}),
+            };
+          }
           const cursor = result.nextFileName + "|" + result.nextFileId;
           requireSafe(!cursors.has(cursor), "b2_cursor_repeated");
           cursors.add(cursor);
@@ -772,6 +788,17 @@ export function connectProviders(
       );
       for (let attempt = 0; attempt < 2; attempt++) {
         try {
+          if (c.scope.accountPartitions) {
+            if (partitionStoredBytes === undefined) {
+              await (partitionProbe ??= b2.inventory());
+            }
+            const cap = storagePartitionCap(c.scope.accountPartitions, B2_NAME);
+            requireSafe(
+              partitionStoredBytes + bytes.length <= cap,
+              "account_partition_storage_exhausted",
+            );
+            partitionStoredBytes += bytes.length;
+          }
           let upload = uploads.get(slot);
           if (!upload) {
             upload = await native("write", "b2_get_upload_url", {

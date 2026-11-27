@@ -222,6 +222,52 @@ const environment = () => ({
   AGE_RECIPIENT: "synthetic",
 });
 
+test("staging partition opt-in is independent of protected source secrets and refuses conflicts or invalid ceilings", () => {
+  const env = environment(),
+    policy = {
+      version: 1,
+      buckets: [{ name: scope.b2Name, storageCapBytes: 4000000000 }, {
+        name: "synthetic-production-backup",
+        storageCapBytes: 4000000000,
+      }],
+      otherStorageReservedBytes: 1000000000,
+    };
+  assert.equal(configFromEnv(env).scope.accountPartitions, undefined);
+  const next = {
+    ...env,
+    BACKUP_ACCOUNT_PARTITIONS_JSON: JSON.stringify(policy),
+  };
+  assert.deepEqual(configFromEnv(next).scope.accountPartitions, policy);
+  assert.equal(env.BACKUP_SCOPE_JSON, JSON.stringify(scope));
+  assert.throws(
+    () =>
+      configFromEnv({ ...next, BACKUP_ACCOUNT_PARTITIONS_JSON: "bad json" }),
+    /partition_configuration/,
+  );
+  assert.throws(
+    () =>
+      configFromEnv({
+        ...next,
+        BACKUP_SCOPE_JSON: JSON.stringify({
+          ...scope,
+          accountPartitions: { ...policy, otherStorageReservedBytes: 100 },
+        }),
+      }),
+    /conflicting/,
+  );
+  assert.throws(
+    () =>
+      configFromEnv({
+        ...next,
+        BACKUP_ACCOUNT_PARTITIONS_JSON: JSON.stringify({
+          ...policy,
+          otherStorageReservedBytes: 2000000000,
+        }),
+      }),
+    /capacity_rejected/,
+  );
+});
+
 test("read-only exporters retry transport/body failures, bound retries and refuse auth failures", async () => {
   let calls = 0;
   const result = await retrySourceRead(async () => {
