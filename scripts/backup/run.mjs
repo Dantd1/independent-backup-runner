@@ -9,7 +9,7 @@ import {
   scheduleObservation,
   snapshot,
 } from "./core.mjs";
-import { connectProviders } from "./providers.mjs";
+import { connectProviders, safeProviderPhase } from "./providers.mjs";
 import {
   createRecurringAdapters,
   recurringUsageTelemetry,
@@ -125,7 +125,7 @@ try {
       status: "failed",
       environment: "staging",
       code: safe,
-      phase: /^[a-z_]+$/.test(e.safePhase ?? "") ? e.safePhase : undefined,
+      phase: safeProviderPhase(e.safePhase),
       paidUsageAuthorized: false,
     }),
   );

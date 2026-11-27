@@ -215,7 +215,14 @@ export function createRecurringAdapters(raw, config, { limits = {} } = {}) {
       );
       reserve("uploadBytes", bytes.length);
       reserve("destinationWrites", 1);
-      return await raw.b2.put(key, bytes, options);
+      return await raw.b2.put(key, bytes, {
+        ...options,
+        reserveRetry: () => {
+          reserve("uploadBytes", bytes.length);
+          reserve("downloadBytes", 2 * 16384);
+          reserve("destinationWrites", 2);
+        },
+      });
     },
     async read(key, limit) {
       active();

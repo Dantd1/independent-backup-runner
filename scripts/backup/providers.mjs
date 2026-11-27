@@ -511,6 +511,7 @@ export function signedReadHeaders(id, secret, body, now = Date.now()) {
   };
 }
 export async function boundedBytes(response, limit = 64 * 1024 * 1024) {
+  if (!response.ok) await response.body?.cancel().catch(() => {});
   requireSafe(response.ok, "provider_http_" + response.status);
   const chunks = [];
   let size = 0;
@@ -520,6 +521,24 @@ export async function boundedBytes(response, limit = 64 * 1024 * 1024) {
     chunks.push(chunk);
   }
   return Buffer.concat(chunks);
+}
+export function safeProviderPhase(value) {
+  const allowed = [
+    "b2_authorize_read",
+    "b2_authorize_write",
+    "b2_get_upload_url",
+    "b2_upload_file",
+    "b2_upload_retry_budget",
+    "b2_inventory",
+    "b2_download",
+    "b2_list_buckets",
+    "b2_list_file_versions",
+    "b2_update_file_retention",
+  ];
+  return typeof value === "string" &&
+      (/^[a-z_]{1,64}$/.test(value) || allowed.includes(value))
+    ? value
+    : undefined;
 }
 // Exporter POSTs are authenticated read-only operations. Consume the body inside
 // the retry boundary, and regenerate signed headers on every attempt.
@@ -567,7 +586,13 @@ export async function retrySourceRead(
     }
   }
 }
-export function connectProviders(c, { fetcher = fetch } = {}) {
+export function connectProviders(
+  c,
+  {
+    fetcher = fetch,
+    pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  } = {},
+) {
   const {
     projectRef: STAGE,
     b2Bucket: B2_BUCKET,
@@ -579,10 +604,23 @@ export function connectProviders(c, { fetcher = fetch } = {}) {
       redirect: "error",
       signal: AbortSignal.timeout(45000),
     });
-  const json = async (url, options = {}) =>
-    JSON.parse(
-      (await boundedBytes(await request(url, options))).toString("utf8"),
-    );
+  const json = async (
+    url,
+    options = {},
+    phase = "b2_response",
+    limit = 64 * 1024 * 1024,
+  ) => {
+    try {
+      return JSON.parse(
+        (await boundedBytes(await request(url, options), limit)).toString(
+          "utf8",
+        ),
+      );
+    } catch (error) {
+      if (error && typeof error === "object") error.safePhase = phase;
+      throw error;
+    }
+  };
   const auths = {};
   async function auth(role) {
     if (auths[role]) return auths[role];
@@ -596,6 +634,7 @@ export function connectProviders(c, { fetcher = fetch } = {}) {
             Buffer.from(id + ":" + key).toString("base64"),
         },
       },
+      "b2_authorize_" + role,
     );
     const api = result.apiInfo.storageApi, allowed = api.allowed;
     const capabilities = role === "read"
@@ -624,11 +663,16 @@ export function connectProviders(c, { fetcher = fetch } = {}) {
   async function native(role, method, body) {
     const a = await auth(role);
     b2Url(a.apiUrl);
-    return json(a.apiUrl + "/b2api/v4/" + method, {
-      method: "POST",
-      headers: { Authorization: a.token, "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
+    return json(
+      a.apiUrl + "/b2api/v4/" + method,
+      {
+        method: "POST",
+        headers: { Authorization: a.token, "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+      method,
+      method === "b2_get_upload_url" ? 16384 : 64 * 1024 * 1024,
+    );
   }
   const uploads = new Map();
   const b2 = {
@@ -640,72 +684,77 @@ export function connectProviders(c, { fetcher = fetch } = {}) {
       ...(c.databaseRole ? [c.databaseRole] : []),
     ],
     async inventory() {
-      await auth("write");
-      const reader = await auth("read");
-      b2Url(reader.s3ApiUrl);
-      const aws = new AwsClient({
-        accessKeyId: c.B2_READ_KEY_ID,
-        secretAccessKey: c.B2_READ_KEY,
-        service: "s3",
-        region: "us-east-005",
-      });
-      const xml = (await boundedBytes(
-        await aws.fetch(reader.s3ApiUrl + "/", {
-          redirect: "error",
-          signal: AbortSignal.timeout(45000),
-        }),
-        1024 * 1024,
-      )).toString();
-      const buckets = [...xml.matchAll(/<Name>([^<]+)<\/Name>/g)].map((m) =>
-        m[1]
-      );
-      requireSafe(
-        buckets.length === 1 && buckets[0] === B2_NAME,
-        "unaccounted_b2_bucket",
-      );
-      const state = await native("read", "b2_list_buckets", {
-        accountId: c.scope.b2Account,
-        bucketId: B2_BUCKET,
-      });
-      requireSafe(
-        state.buckets.length === 1 &&
-          state.buckets[0].bucketType === "allPrivate",
-        "b2_bucket_not_private",
-      );
-      const files = new Map(), cursors = new Set();
-      let bytes = 0, next = {};
-      for (let page = 0; page < 100; page++) {
-        const result = await native("read", "b2_list_file_versions", {
-          bucketId: B2_BUCKET,
-          prefix: "staging/",
-          maxFileCount: 10000,
-          ...next,
+      try {
+        await auth("write");
+        const reader = await auth("read");
+        b2Url(reader.s3ApiUrl);
+        const aws = new AwsClient({
+          accessKeyId: c.B2_READ_KEY_ID,
+          secretAccessKey: c.B2_READ_KEY,
+          service: "s3",
+          region: "us-east-005",
         });
-        for (const f of result.files) {
-          if (f.action === "upload") {
-            bytes += f.contentLength;
-            if (!files.has(f.fileName)) {
-              files.set(f.fileName, {
-                id: f.fileId,
-                name: f.fileName,
-                size: f.contentLength,
-                sourceDigest: f.fileInfo?.["xf-source-sha256"],
-                mode: f.fileRetention?.value?.mode,
-                until: f.fileRetention?.value?.retainUntilTimestamp,
-              });
+        const xml = (await boundedBytes(
+          await aws.fetch(reader.s3ApiUrl + "/", {
+            redirect: "error",
+            signal: AbortSignal.timeout(45000),
+          }),
+          1024 * 1024,
+        )).toString();
+        const buckets = [...xml.matchAll(/<Name>([^<]+)<\/Name>/g)].map((m) =>
+          m[1]
+        );
+        requireSafe(
+          buckets.length === 1 && buckets[0] === B2_NAME,
+          "unaccounted_b2_bucket",
+        );
+        const state = await native("read", "b2_list_buckets", {
+          accountId: c.scope.b2Account,
+          bucketId: B2_BUCKET,
+        });
+        requireSafe(
+          state.buckets.length === 1 &&
+            state.buckets[0].bucketType === "allPrivate",
+          "b2_bucket_not_private",
+        );
+        const files = new Map(), cursors = new Set();
+        let bytes = 0, next = {};
+        for (let page = 0; page < 100; page++) {
+          const result = await native("read", "b2_list_file_versions", {
+            bucketId: B2_BUCKET,
+            prefix: "staging/",
+            maxFileCount: 10000,
+            ...next,
+          });
+          for (const f of result.files) {
+            if (f.action === "upload") {
+              bytes += f.contentLength;
+              if (!files.has(f.fileName)) {
+                files.set(f.fileName, {
+                  id: f.fileId,
+                  name: f.fileName,
+                  size: f.contentLength,
+                  sourceDigest: f.fileInfo?.["xf-source-sha256"],
+                  mode: f.fileRetention?.value?.mode,
+                  until: f.fileRetention?.value?.retainUntilTimestamp,
+                });
+              }
             }
           }
+          if (!result.nextFileName) return { bytes, files };
+          const cursor = result.nextFileName + "|" + result.nextFileId;
+          requireSafe(!cursors.has(cursor), "b2_cursor_repeated");
+          cursors.add(cursor);
+          next = {
+            startFileName: result.nextFileName,
+            startFileId: result.nextFileId,
+          };
         }
-        if (!result.nextFileName) return { bytes, files };
-        const cursor = result.nextFileName + "|" + result.nextFileId;
-        requireSafe(!cursors.has(cursor), "b2_cursor_repeated");
-        cursors.add(cursor);
-        next = {
-          startFileName: result.nextFileName,
-          startFileId: result.nextFileId,
-        };
+        requireSafe(false, "b2_pagination_limit");
+      } catch (error) {
+        error.safePhase ??= "b2_inventory";
+        throw error;
       }
-      requireSafe(false, "b2_pagination_limit");
     },
     async extend(f, until) {
       await native("write", "b2_update_file_retention", {
@@ -714,53 +763,83 @@ export function connectProviders(c, { fetcher = fetch } = {}) {
         fileRetention: { mode: "compliance", retainUntilTimestamp: until },
       });
     },
-    async put(name, bytes, { until, sourceDigest, slot }) {
+    async put(name, bytes, { until, sourceDigest, slot, reserveRetry }) {
       requireSafe(
         name.startsWith("staging/") && bytes.length <= 64 * 1024 * 1024 &&
           !name.startsWith("staging/credentials/") &&
           !name.startsWith("staging/recovery/"),
         "upload_scope_rejected",
       );
-      let upload = uploads.get(slot);
-      if (!upload) {
-        upload = await native("write", "b2_get_upload_url", {
-          bucketId: B2_BUCKET,
-        });
-        b2Url(upload.uploadUrl);
-        uploads.set(slot, upload);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          let upload = uploads.get(slot);
+          if (!upload) {
+            upload = await native("write", "b2_get_upload_url", {
+              bucketId: B2_BUCKET,
+            });
+            b2Url(upload.uploadUrl);
+            uploads.set(slot, upload);
+          }
+          const sha1 = createHash("sha1").update(bytes).digest("hex");
+          const result = await json(
+            upload.uploadUrl,
+            {
+              method: "POST",
+              headers: {
+                Authorization: upload.authorizationToken,
+                "Content-Type": "application/octet-stream",
+                "Content-Length": String(bytes.length),
+                "X-Bz-File-Name": encodeURIComponent(name),
+                "X-Bz-Content-Sha1": sha1,
+                "X-Bz-File-Retention-Mode": "compliance",
+                "X-Bz-File-Retention-Retain-Until-Timestamp": String(until),
+                ...(sourceDigest
+                  ? { "X-Bz-Info-xf-source-sha256": sourceDigest }
+                  : {}),
+              },
+              body: bytes,
+            },
+            "b2_upload_file",
+            16384,
+          );
+          requireSafe(
+            result.fileName === name && result.contentLength === bytes.length &&
+              result.contentSha1 === sha1,
+            "upload_integrity_mismatch",
+          );
+          return { id: result.fileId, size: result.contentLength };
+        } catch (error) {
+          const unavailable = error.safeCode === "provider_http_503" &&
+            ["b2_get_upload_url", "b2_upload_file"].includes(error.safePhase);
+          if (unavailable) uploads.delete(slot);
+          // Retry only an explicit 503, never an ambiguous timeout or bad 200.
+          // The adapter must reserve the entire repeat before any further I/O.
+          if (
+            !unavailable || attempt !== 0 || typeof reserveRetry !== "function"
+          ) throw error;
+          try {
+            reserveRetry();
+          } catch (budgetError) {
+            budgetError.safePhase = "b2_upload_retry_budget";
+            throw budgetError;
+          }
+          await pause(1000);
+        }
       }
-      const sha1 = createHash("sha1").update(bytes).digest("hex");
-      const result = await json(upload.uploadUrl, {
-        method: "POST",
-        headers: {
-          Authorization: upload.authorizationToken,
-          "Content-Type": "application/octet-stream",
-          "Content-Length": String(bytes.length),
-          "X-Bz-File-Name": encodeURIComponent(name),
-          "X-Bz-Content-Sha1": sha1,
-          "X-Bz-File-Retention-Mode": "compliance",
-          "X-Bz-File-Retention-Retain-Until-Timestamp": String(until),
-          ...(sourceDigest
-            ? { "X-Bz-Info-xf-source-sha256": sourceDigest }
-            : {}),
-        },
-        body: bytes,
-      });
-      requireSafe(
-        result.fileName === name && result.contentLength === bytes.length &&
-          result.contentSha1 === sha1,
-        "upload_integrity_mismatch",
-      );
-      return { id: result.fileId, size: result.contentLength };
     },
     async read(name, limit) {
-      const a = await auth("read");
-      const url = a.downloadUrl + "/file/" + B2_NAME + "/" + sourcePath(name);
-      b2Url(url);
-      return boundedBytes(
-        await request(url, { headers: { Authorization: a.token } }),
-        limit,
-      );
+      try {
+        const a = await auth("read");
+        const url = a.downloadUrl + "/file/" + B2_NAME + "/" + sourcePath(name);
+        b2Url(url);
+        return await boundedBytes(
+          await request(url, { headers: { Authorization: a.token } }),
+          limit,
+        );
+      } catch (error) {
+        error.safePhase ??= "b2_download";
+        throw error;
+      }
     },
   };
   const storageUrl =
